@@ -715,6 +715,34 @@ class BusinessContext(BaseModel):
     cost_incurred: Optional[float] = None
     satisfaction_score: Optional[float] = Field(None, ge=1, le=5)
 
+# ============================================================================
+# GENERIC RESPONSE TYPES
+# ============================================================================
+
+class PaginatedResponse(BaseModel, Generic[T]):
+    """Generic paginated response structure"""
+    items: List[T]
+    total: int
+    page: int
+    page_size: int
+    has_next: bool
+    has_previous: bool
+
+
+class APIResponse(BaseModel, Generic[T]):
+    """Generic API response wrapper"""
+    status: str = Field(default="success")
+    data: Optional[T] = None
+    error: Optional[Dict[str, Any]] = None
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ErrorDetail(BaseModel):
+    """Error detail structure"""
+    code: str
+    message: str
+    field: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
 
 # ============================================================================
 # VALIDATION UTILITIES
@@ -899,6 +927,7 @@ __all__ = [
     'SessionStatus', 'DeliveryStatus', 'Priority', 'UserRole', 'TenantPlan',
     'IntegrationType', 'ModelProvider', 'SentimentLabel', 'IntentConfidence',
     'LanguageCode', 'ErrorCode','MediaContent','MessageContent','ContactContent',
+    'ChannelMetadata', 'ProcessingHints',
 
     # Validation utilities
     'ValidationUtils', 'SerializationUtils',
@@ -912,4 +941,7 @@ __all__ = [
 
     # Common structures
     'StatusInfo', 'PaginationParams',
+
+    # Genric type response
+    'PaginatedResponse','APIResponse','ErrorDetail',''
 ]
