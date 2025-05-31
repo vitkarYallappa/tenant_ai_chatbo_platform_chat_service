@@ -1,29 +1,40 @@
 """
-Common Types and Enumerations
-============================
+Unified Type Definitions and Enumerations
+=========================================
 
-Centralized type definitions and enumerations used across the chat service
-for consistency and type safety.
+Comprehensive type definitions, enumerations, and validation utilities used across the chat service.
+Combines and extends functionality from both old and new type systems for maximum compatibility
+and feature completeness.
 
 Features:
-- Common enumeration types
-- Type aliases for clarity
-- Validation utilities
+- Complete enumeration types with utility methods
+- Type aliases with validation
+- Pydantic models for complex data structures
+- Validation utilities and type guards
 - Serialization support
+- Factory functions for ID generation
+- Generic response types
 """
-
-from enum import Enum, IntEnum
-from typing import TypeVar, NewType, Union, List, Dict, Any, Optional
-from datetime import datetime
-import re
 import uuid
+from enum import Enum, IntEnum
+from typing import TypeVar, NewType, Union, List, Dict, Any, Optional, Generic
+from datetime import datetime
+from pydantic import BaseModel, Field, validator
+from uuid import UUID, uuid4
+import re
 
-# Generic type variables
+# ============================================================================
+# GENERIC TYPE VARIABLES
+# ============================================================================
+
 T = TypeVar('T')
 K = TypeVar('K')
 V = TypeVar('V')
 
-# Type aliases for better code readability
+# ============================================================================
+# TYPE ALIASES FOR BETTER CODE READABILITY
+# ============================================================================
+
 TenantId = NewType('TenantId', str)
 UserId = NewType('UserId', str)
 ConversationId = NewType('ConversationId', str)
@@ -35,6 +46,10 @@ ApiKeyId = NewType('ApiKeyId', str)
 
 # Timestamp type for consistent datetime handling
 Timestamp = NewType('Timestamp', datetime)
+
+# ============================================================================
+# ENUMERATIONS FOR TYPE SAFETY
+# ============================================================================
 
 class ChannelType(str, Enum):
     """Communication channel types"""
@@ -59,6 +74,18 @@ class ChannelType(str, Enum):
     def is_valid_channel(cls, channel: str) -> bool:
         """Check if channel type is valid"""
         return channel in cls.get_supported_channels()
+
+    @classmethod
+    def get_messaging_channels(cls) -> List[str]:
+        """Get channels that support messaging"""
+        return [cls.WEB.value, cls.WHATSAPP.value, cls.MESSENGER.value,
+                cls.SLACK.value, cls.TEAMS.value, cls.TELEGRAM.value, cls.SMS.value]
+
+    @classmethod
+    def get_voice_channels(cls) -> List[str]:
+        """Get channels that support voice"""
+        return [cls.VOICE.value, cls.WHATSAPP.value, cls.TELEGRAM.value]
+
 
 class MessageType(str, Enum):
     """Message content types"""
@@ -86,11 +113,18 @@ class MessageType(str, Enum):
         """Get interactive message types"""
         return [cls.QUICK_REPLY.value, cls.CAROUSEL.value, cls.FORM.value]
 
+    @classmethod
+    def get_system_types(cls) -> List[str]:
+        """Get system message types"""
+        return [cls.SYSTEM.value, cls.TYPING.value, cls.READ_RECEIPT.value]
+
+
 class MessageDirection(str, Enum):
     """Message direction in conversation"""
     INBOUND = "inbound"
     OUTBOUND = "outbound"
     INTERNAL = "internal"  # System-generated messages
+
 
 class ConversationStatus(str, Enum):
     """Conversation lifecycle status"""
@@ -112,12 +146,28 @@ class ConversationStatus(str, Enum):
         """Get final statuses"""
         return [cls.COMPLETED.value, cls.ABANDONED.value, cls.ARCHIVED.value]
 
+    @classmethod
+    def can_transition_to(cls, from_status: str, to_status: str) -> bool:
+        """Check if status transition is valid"""
+        valid_transitions = {
+            cls.ACTIVE.value: [cls.COMPLETED.value, cls.ABANDONED.value, cls.ESCALATED.value, cls.PAUSED.value, cls.ERROR.value],
+            cls.PAUSED.value: [cls.ACTIVE.value, cls.COMPLETED.value, cls.ABANDONED.value],
+            cls.ESCALATED.value: [cls.ACTIVE.value, cls.COMPLETED.value, cls.ABANDONED.value],
+            cls.ERROR.value: [cls.ACTIVE.value, cls.ABANDONED.value],
+            cls.COMPLETED.value: [cls.ARCHIVED.value],
+            cls.ABANDONED.value: [cls.ARCHIVED.value],
+            cls.ARCHIVED.value: []
+        }
+        return to_status in valid_transitions.get(from_status, [])
+
+
 class SessionStatus(str, Enum):
     """User session status"""
     ACTIVE = "active"
     EXPIRED = "expired"
     TERMINATED = "terminated"
     SUSPENDED = "suspended"
+
 
 class DeliveryStatus(str, Enum):
     """Message delivery status"""
@@ -127,6 +177,28 @@ class DeliveryStatus(str, Enum):
     FAILED = "failed"
     PENDING = "pending"
     REJECTED = "rejected"
+
+    @classmethod
+    def get_successful_statuses(cls) -> List[str]:
+        """Get statuses that indicate successful delivery"""
+        return [cls.SENT.value, cls.DELIVERED.value, cls.READ.value]
+
+    @classmethod
+    def get_failed_statuses(cls) -> List[str]:
+        """Get statuses that indicate delivery failure"""
+        return [cls.FAILED.value, cls.REJECTED.value]
+
+
+class ProcessingStage(str, Enum):
+    """Message processing stages"""
+    RECEIVED = "received"
+    VALIDATED = "validated"
+    NORMALIZED = "normalized"
+    PROCESSED = "processed"
+    RESPONDED = "responded"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
 
 class Priority(IntEnum):
     """Priority levels"""
@@ -147,6 +219,11 @@ class Priority(IntEnum):
             "critical": cls.CRITICAL
         }
         return priority_map.get(priority_str.lower(), cls.NORMAL)
+
+    def to_string(self) -> str:
+        """Convert Priority enum to string"""
+        return self.name.lower()
+
 
 class UserRole(str, Enum):
     """User role types"""
@@ -178,6 +255,14 @@ class UserRole(str, Enum):
         required_level = hierarchy.get(required_role.value, 0)
         return current_level >= required_level
 
+    @classmethod
+    def get_roles_with_permission(cls, min_role: "UserRole") -> List[str]:
+        """Get all roles that have at least the specified permission level"""
+        hierarchy = cls.get_permission_hierarchy()
+        min_level = hierarchy.get(min_role.value, 0)
+        return [role for role, level in hierarchy.items() if level >= min_level]
+
+
 class TenantPlan(str, Enum):
     """Tenant subscription plans"""
     FREE = "free"
@@ -185,6 +270,19 @@ class TenantPlan(str, Enum):
     PROFESSIONAL = "professional"
     ENTERPRISE = "enterprise"
     CUSTOM = "custom"
+
+    @classmethod
+    def get_plan_limits(cls, plan: str) -> Dict[str, int]:
+        """Get limits for each plan"""
+        limits = {
+            cls.FREE.value: {"messages_per_month": 1000, "integrations": 2, "users": 3},
+            cls.STARTER.value: {"messages_per_month": 10000, "integrations": 5, "users": 10},
+            cls.PROFESSIONAL.value: {"messages_per_month": 100000, "integrations": 20, "users": 50},
+            cls.ENTERPRISE.value: {"messages_per_month": -1, "integrations": -1, "users": -1},
+            cls.CUSTOM.value: {"messages_per_month": -1, "integrations": -1, "users": -1}
+        }
+        return limits.get(plan, limits[cls.FREE.value])
+
 
 class IntegrationType(str, Enum):
     """Integration types for external services"""
@@ -194,6 +292,8 @@ class IntegrationType(str, Enum):
     DATABASE = "database"
     OAUTH2 = "oauth2"
     CUSTOM = "custom"
+    WEBSOCKET = "websocket"
+
 
 class ModelProvider(str, Enum):
     """AI model providers"""
@@ -203,6 +303,25 @@ class ModelProvider(str, Enum):
     AZURE = "azure"
     HUGGINGFACE = "huggingface"
     CUSTOM = "custom"
+    COHERE = "cohere"
+    MISTRAL = "mistral"
+
+
+class IntentType(str, Enum):
+    """Common intent types"""
+    GREETING = "greeting"
+    ORDER_INQUIRY = "order_inquiry"
+    TECHNICAL_SUPPORT = "technical_support"
+    BILLING_QUESTION = "billing_question"
+    GENERAL_INFO = "general_info"
+    ESCALATION = "escalation"
+    GOODBYE = "goodbye"
+    UNKNOWN = "unknown"
+    COMPLAINT = "complaint"
+    COMPLIMENT = "compliment"
+    BOOKING = "booking"
+    CANCELLATION = "cancellation"
+
 
 class SentimentLabel(str, Enum):
     """Sentiment analysis labels"""
@@ -211,11 +330,33 @@ class SentimentLabel(str, Enum):
     NEUTRAL = "neutral"
     MIXED = "mixed"
 
+    @classmethod
+    def from_score(cls, score: float) -> "SentimentLabel":
+        """Convert numerical score to sentiment label"""
+        if score > 0.1:
+            return cls.POSITIVE
+        elif score < -0.1:
+            return cls.NEGATIVE
+        else:
+            return cls.NEUTRAL
+
+
 class IntentConfidence(str, Enum):
     """Intent confidence levels"""
     HIGH = "high"      # > 0.8
     MEDIUM = "medium"  # 0.5 - 0.8
     LOW = "low"        # < 0.5
+
+    @classmethod
+    def from_score(cls, score: float) -> "IntentConfidence":
+        """Convert numerical score to confidence level"""
+        if score > 0.8:
+            return cls.HIGH
+        elif score >= 0.5:
+            return cls.MEDIUM
+        else:
+            return cls.LOW
+
 
 class LanguageCode(str, Enum):
     """Supported language codes (ISO 639-1)"""
@@ -231,11 +372,37 @@ class LanguageCode(str, Enum):
     KO = "ko"  # Korean
     AR = "ar"  # Arabic
     HI = "hi"  # Hindi
+    NL = "nl"  # Dutch
+    SV = "sv"  # Swedish
+    NO = "no"  # Norwegian
 
     @classmethod
     def get_supported_languages(cls) -> List[str]:
         """Get list of supported language codes"""
         return [lang.value for lang in cls]
+
+    @classmethod
+    def get_language_name(cls, code: str) -> str:
+        """Get human-readable language name"""
+        names = {
+            cls.EN.value: "English",
+            cls.ES.value: "Spanish",
+            cls.FR.value: "French",
+            cls.DE.value: "German",
+            cls.IT.value: "Italian",
+            cls.PT.value: "Portuguese",
+            cls.RU.value: "Russian",
+            cls.ZH.value: "Chinese",
+            cls.JA.value: "Japanese",
+            cls.KO.value: "Korean",
+            cls.AR.value: "Arabic",
+            cls.HI.value: "Hindi",
+            cls.NL.value: "Dutch",
+            cls.SV.value: "Swedish",
+            cls.NO.value: "Norwegian"
+        }
+        return names.get(code, "Unknown")
+
 
 class ErrorCode(str, Enum):
     """Standardized error codes"""
@@ -276,7 +443,283 @@ class ErrorCode(str, Enum):
     UNSUPPORTED_MEDIA_TYPE = "UNSUPPORTED_MEDIA_TYPE"
     DELIVERY_FAILED = "DELIVERY_FAILED"
 
-# Validation utilities
+# ============================================================================
+# PYDANTIC MODELS FOR COMPLEX DATA STRUCTURES
+# ============================================================================
+
+class MediaContent(BaseModel):
+    """Media content structure for images, videos, audio, files"""
+    url: str = Field(..., regex=r'^https?://')
+    type: str = Field(..., description="MIME type")
+    size_bytes: int = Field(..., ge=0, le=52428800)  # Max 50MB
+    alt_text: Optional[str] = Field(None, max_length=500)
+    thumbnail_url: Optional[str] = None
+
+    # Audio/Video specific
+    duration_ms: Optional[int] = Field(None, ge=0)
+
+    # Image specific
+    dimensions: Optional[Dict[str, int]] = None  # width, height
+
+    # File specific
+    filename: Optional[str] = Field(None, max_length=255)
+    file_extension: Optional[str] = Field(None, max_length=10)
+
+    @validator('type')
+    def validate_mime_type(cls, v):
+        allowed_types = [
+            # Images
+            'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
+            # Videos
+            'video/mp4', 'video/quicktime', 'video/webm', 'video/avi',
+            # Audio
+            'audio/mpeg', 'audio/wav', 'audio/ogg', 'audio/m4a', 'audio/flac',
+            # Documents
+            'application/pdf', 'text/plain', 'text/csv', 'application/json',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+        ]
+        if v not in allowed_types:
+            raise ValueError(f'Unsupported media type: {v}')
+        return v
+
+
+class LocationContent(BaseModel):
+    """Location data structure"""
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+    accuracy_meters: Optional[int] = Field(None, ge=0)
+    address: Optional[str] = Field(None, max_length=500)
+    place_name: Optional[str] = Field(None, max_length=200)
+    place_id: Optional[str] = Field(None, max_length=100)
+    country: Optional[str] = Field(None, max_length=100)
+    city: Optional[str] = Field(None, max_length=100)
+    postal_code: Optional[str] = Field(None, max_length=20)
+
+
+class ContactContent(BaseModel):
+    """Contact information structure"""
+    name: str = Field(..., max_length=200)
+    phone_number: Optional[str] = Field(None, regex=r'^\+[1-9]\d{1,14}$')
+    email: Optional[str] = None
+    organization: Optional[str] = Field(None, max_length=200)
+    formatted_address: Optional[str] = Field(None, max_length=500)
+
+    @validator('email')
+    def validate_email(cls, v):
+        if v:
+            pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            if not re.match(pattern, v.lower()):
+                raise ValueError('Invalid email format')
+            return v.lower()
+        return v
+
+
+class QuickReply(BaseModel):
+    """Quick reply button structure"""
+    title: str = Field(..., max_length=20)
+    payload: str = Field(..., max_length=1000)
+    content_type: str = Field(default="text")
+    image_url: Optional[str] = None
+
+
+class Button(BaseModel):
+    """Interactive button structure"""
+    type: str = Field(..., regex=r'^(postback|url|phone|share|login|call)$')
+    title: str = Field(..., max_length=20)
+    payload: Optional[str] = Field(None, max_length=1000)
+    url: Optional[str] = None
+    webview_height_ratio: Optional[str] = Field(None, regex=r'^(compact|tall|full)$')
+
+
+class CarouselItem(BaseModel):
+    """Individual item in a carousel"""
+    title: str = Field(..., max_length=80)
+    subtitle: Optional[str] = Field(None, max_length=80)
+    image_url: Optional[str] = None
+    default_action: Optional[Dict[str, Any]] = None
+    buttons: Optional[List[Button]] = Field(None, max_items=3)
+
+
+class FormField(BaseModel):
+    """Form field definition"""
+    field_id: str = Field(..., max_length=50)
+    field_type: str = Field(..., regex=r'^(text|email|phone|number|date|select|textarea|checkbox|radio)$')
+    label: str = Field(..., max_length=100)
+    required: bool = Field(default=False)
+    placeholder: Optional[str] = Field(None, max_length=100)
+    options: Optional[List[str]] = None  # For select/radio fields
+    validation_regex: Optional[str] = None
+    min_length: Optional[int] = None
+    max_length: Optional[int] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+
+
+class MessageContent(BaseModel):
+    """Main message content structure"""
+    type: MessageType
+    text: Optional[str] = Field(None, max_length=4096)
+    language: Optional[str] = Field(default="en", regex=r'^[a-z]{2}$')
+
+    # Rich content
+    media: Optional[MediaContent] = None
+    location: Optional[LocationContent] = None
+    contact: Optional[ContactContent] = None
+
+    # Interactive elements
+    quick_replies: Optional[List[QuickReply]] = Field(None, max_items=13)
+    buttons: Optional[List[Button]] = Field(None, max_items=3)
+    carousel: Optional[List[CarouselItem]] = Field(None, max_items=10)
+
+    # Form content
+    form_fields: Optional[List[FormField]] = None
+    form_data: Optional[Dict[str, Any]] = None
+
+    # System message specifics
+    system_event: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+    @validator('text')
+    def text_required_for_text_type(cls, v, values):
+        if values.get('type') == MessageType.TEXT and not v:
+            raise ValueError('Text content required for text messages')
+        return v
+
+    @validator('media')
+    def media_required_for_media_types(cls, v, values):
+        media_types = [MessageType.IMAGE, MessageType.FILE, MessageType.AUDIO, MessageType.VIDEO]
+        if values.get('type') in media_types and not v:
+            raise ValueError(f'Media content required for {values.get("type")} messages')
+        return v
+
+    @validator('location')
+    def location_required_for_location_type(cls, v, values):
+        if values.get('type') == MessageType.LOCATION and not v:
+            raise ValueError('Location content required for location messages')
+        return v
+
+    @validator('contact')
+    def contact_required_for_contact_type(cls, v, values):
+        if values.get('type') == MessageType.CONTACT and not v:
+            raise ValueError('Contact content required for contact messages')
+        return v
+
+
+class ChannelMetadata(BaseModel):
+    """Channel-specific metadata"""
+    platform_message_id: Optional[str] = None
+    platform_user_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    workspace_id: Optional[str] = None
+    bot_id: Optional[str] = None
+    team_id: Optional[str] = None
+
+    # Delivery tracking
+    delivery_status: Optional[DeliveryStatus] = None
+    delivery_timestamp: Optional[datetime] = None
+    read_timestamp: Optional[datetime] = None
+    delivery_attempts: int = Field(default=0)
+
+    # Additional platform-specific data
+    additional_data: Optional[Dict[str, Any]] = Field(default_factory=dict)
+
+
+class ProcessingHints(BaseModel):
+    """Hints for message processing"""
+    priority: Priority = Field(default=Priority.NORMAL)
+    expected_response_type: Optional[MessageType] = None
+    bypass_automation: bool = Field(default=False)
+    require_human_review: bool = Field(default=False)
+    processing_timeout_ms: Optional[int] = Field(None, ge=1000, le=30000)
+    cost_limit_cents: Optional[int] = Field(None, ge=0)
+    tags: List[str] = Field(default_factory=list)
+
+
+class IntentResult(BaseModel):
+    """Intent detection result"""
+    detected_intent: str
+    confidence: float = Field(..., ge=0, le=1)
+    alternatives: List[Dict[str, Any]] = Field(default_factory=list)
+    intent_type: Optional[IntentType] = None
+    confidence_level: Optional[IntentConfidence] = None
+
+    @validator('confidence_level', always=True)
+    def set_confidence_level(cls, v, values):
+        confidence = values.get('confidence', 0)
+        return IntentConfidence.from_score(confidence)
+
+
+class EntityResult(BaseModel):
+    """Named entity extraction result"""
+    entity_type: str
+    entity_value: str
+    start_pos: int
+    end_pos: int
+    confidence: float = Field(..., ge=0, le=1)
+    resolution: Optional[Dict[str, Any]] = None
+    source: str = Field(default="user_input")
+
+
+class SentimentResult(BaseModel):
+    """Sentiment analysis result"""
+    label: SentimentLabel
+    score: float = Field(..., ge=-1, le=1)
+    confidence: float = Field(..., ge=0, le=1)
+    emotions: Optional[Dict[str, float]] = None
+
+    @validator('label', always=True)
+    def set_label_from_score(cls, v, values):
+        score = values.get('score', 0)
+        return SentimentLabel.from_score(score)
+
+
+class ToxicityResult(BaseModel):
+    """Content toxicity analysis result"""
+    is_toxic: bool
+    toxicity_score: float = Field(..., ge=0, le=1)
+    categories: List[str] = Field(default_factory=list)
+    severity: Optional[str] = None
+
+
+class UserInfo(BaseModel):
+    """User information for context"""
+    first_seen: datetime
+    return_visitor: bool = Field(default=False)
+    language: str = Field(default="en")
+    timezone: Optional[str] = None
+
+    device_info: Optional[Dict[str, str]] = None
+    location_info: Optional[Dict[str, str]] = None
+
+    # Privacy-compliant data
+    preferences: Dict[str, Any] = Field(default_factory=dict)
+    custom_attributes: Dict[str, Any] = Field(default_factory=dict)
+    interaction_count: int = Field(default=0)
+    last_interaction: Optional[datetime] = None
+
+
+class BusinessContext(BaseModel):
+    """Business-specific context"""
+    department: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    priority: Priority = Field(default=Priority.NORMAL)
+    tags: List[str] = Field(default_factory=list)
+
+    # Resolution tracking
+    resolution_type: Optional[str] = None
+    outcome: Optional[str] = None
+    value_generated: Optional[float] = None
+    cost_incurred: Optional[float] = None
+    satisfaction_score: Optional[float] = Field(None, ge=1, le=5)
+
+
+# ============================================================================
+# VALIDATION UTILITIES
+# ============================================================================
+
 class ValidationUtils:
     """Utility functions for type validation"""
 
@@ -284,7 +727,7 @@ class ValidationUtils:
     def is_valid_uuid(value: str) -> bool:
         """Check if string is a valid UUID"""
         try:
-            uuid.UUID(value)
+            UUID(value)
             return True
         except (ValueError, TypeError):
             return False
@@ -329,6 +772,15 @@ class ValidationUtils:
         # Add other validation rules as needed
         return True
 
+    @staticmethod
+    def validate_language_code(code: str) -> bool:
+        """Validate language code"""
+        return code in LanguageCode.get_supported_languages()
+
+
+# ============================================================================
+# SERIALIZATION UTILITIES
+# ============================================================================
 # Serialization utilities
 class SerializationUtils:
     """Utility functions for serialization"""
@@ -446,7 +898,7 @@ __all__ = [
     'ChannelType', 'MessageType', 'MessageDirection', 'ConversationStatus',
     'SessionStatus', 'DeliveryStatus', 'Priority', 'UserRole', 'TenantPlan',
     'IntegrationType', 'ModelProvider', 'SentimentLabel', 'IntentConfidence',
-    'LanguageCode', 'ErrorCode',
+    'LanguageCode', 'ErrorCode','MediaContent','MessageContent','ContactContent',
 
     # Validation utilities
     'ValidationUtils', 'SerializationUtils',
