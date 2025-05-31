@@ -1,494 +1,607 @@
-# src/models/redis/session_cache.py
 """
-Redis data structures for session management.
-Handle active session state and caching with optimized Redis operations.
+Redis Session Cache Models
+=========================
+
+Data models for session management and caching in Redis with
+comprehensive session lifecycle management and multi-tenant support.
+
+Features:
+- Session data structure with TTL management
+- User context and preferences
+- Device and location tracking
+- Security metadata
+- Serialization utilities
 """
 
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field, validator
+from typing import Optional, Dict, Any, List
+from dataclasses import dataclass, asdict, field
+from enum import Enum
 import json
-import hashlib
+import structlog
 
-from src.models.base_model import BaseRedisModel
-from src.models.types import (
-    TenantId, UserId, ConversationId, SessionId, ChannelType
-)
+logger = structlog.get_logger(__name__)
+
+# Type aliases
+TenantId = str
+SessionId = str
+UserId = str
 
 
-class SessionCache(BaseRedisModel):
+class SessionStatus(str, Enum):
+    """Session status enumeration"""
+    ACTIVE = "active"
+    EXPIRED = "expired"
+    TERMINATED = "terminated"
+    SUSPENDED = "suspended"
+
+
+class ChannelType(str, Enum):
+    """Communication channel types"""
+    WEB = "web"
+    WHATSAPP = "whatsapp"
+    MESSENGER = "messenger"
+    SLACK = "slack"
+    TEAMS = "teams"
+    VOICE = "voice"
+    SMS = "sms"
+    API = "api"
+
+
+@dataclass
+class DeviceInfo:
+    """Device information for session tracking"""
+    device_type: str = "unknown"  # mobile, desktop, tablet, voice, etc.
+    operating_system: Optional[str] = None
+    browser: Optional[str] = None
+    browser_version: Optional[str] = None
+    screen_resolution: Optional[str] = None
+    timezone: Optional[str] = None
+    language: str = "en"
+    user_agent: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "DeviceInfo":
+        """Create from dictionary"""
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class LocationInfo:
+    """Location information for session tracking"""
+    country: Optional[str] = None
+    region: Optional[str] = None
+    city: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    timezone: Optional[str] = None
+    ip_address: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "LocationInfo":
+        """Create from dictionary"""
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class UserPreferences:
+    """User preferences stored in session"""
+    language: str = "en"
+    timezone: Optional[str] = None
+    theme: str = "light"
+    notifications_enabled: bool = True
+    voice_enabled: bool = False
+    accessibility_features: List[str] = field(default_factory=list)
+    custom_settings: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "UserPreferences":
+        """Create from dictionary"""
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class SessionContext:
+    """Session context for conversation state"""
+    current_flow_id: Optional[str] = None
+    current_state: Optional[str] = None
+    conversation_id: Optional[str] = None
+    intent_stack: List[str] = field(default_factory=list)
+    entities: Dict[str, Any] = field(default_factory=dict)
+    slots: Dict[str, Any] = field(default_factory=dict)
+    variables: Dict[str, Any] = field(default_factory=dict)
+    conversation_history: List[str] = field(default_factory=list)
+
+    def add_intent(self, intent: str) -> None:
+        """Add intent to the stack"""
+        self.intent_stack.append(intent)
+        # Keep only last 10 intents
+        self.intent_stack = self.intent_stack[-10:]
+
+    def set_slot(self, key: str, value: Any) -> None:
+        """Set a slot value"""
+        self.slots[key] = value
+
+    def get_slot(self, key: str, default: Any = None) -> Any:
+        """Get a slot value"""
+        return self.slots.get(key, default)
+
+    def set_variable(self, key: str, value: Any) -> None:
+        """Set a session variable"""
+        self.variables[key] = value
+
+    def get_variable(self, key: str, default: Any = None) -> Any:
+        """Get a session variable"""
+        return self.variables.get(key, default)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary"""
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SessionContext":
+        """Create from dictionary"""
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class SecurityMetadata:
+    """Security-related session metadata"""
+    ip_address: Optional[str] = None
+    last_seen_ip: Optional[str] = None
+    suspicious_activity: bool = False
+    failed_auth_attempts: int = 0
+    last_auth_attempt: Optional[datetime] = None
+    requires_mfa: bool = False
+    mfa_verified: bool = False
+    session_token_hash: Optional[str] = None
+    csrf_token: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary with datetime serialization"""
+        data = asdict(self)
+        if data['last_auth_attempt']:
+            data['last_auth_attempt'] = data['last_auth_attempt'].isoformat()
+        return data
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SecurityMetadata":
+        """Create from dictionary with datetime deserialization"""
+        if 'last_auth_attempt' in data and data['last_auth_attempt']:
+            if isinstance(data['last_auth_attempt'], str):
+                data['last_auth_attempt'] = datetime.fromisoformat(data['last_auth_attempt'])
+
+        return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
+
+
+@dataclass
+class SessionData:
     """
-    Redis cache structure for active session data.
-    Optimized for fast lookups and updates during active conversations.
-    """
+    Comprehensive session data structure for Redis storage
 
-    # Core identifiers
+    This class provides the complete session state including user context,
+    preferences, security metadata, and conversation state.
+    """
+    # Core session identifiers
     session_id: SessionId
     tenant_id: TenantId
     user_id: UserId
-    conversation_id: Optional[ConversationId] = None
-    channel: ChannelType
 
     # Session lifecycle
-    last_activity: datetime = Field(default_factory=datetime.utcnow)
-    expires_at: datetime = Field(
-        default_factory=lambda: datetime.utcnow() + timedelta(hours=1)
-    )
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    last_activity_at: datetime = field(default_factory=datetime.utcnow)
+    expires_at: datetime = field(default_factory=lambda: datetime.utcnow() + timedelta(hours=1))
+    status: SessionStatus = SessionStatus.ACTIVE
 
-    # Quick access context
-    context: Dict[str, Any] = Field(default_factory=dict)
-    preferences: Dict[str, Any] = Field(default_factory=dict)
+    # Communication context
+    channel: ChannelType = ChannelType.WEB
+    conversation_id: Optional[str] = None
 
-    # User information (minimal for performance)
-    user_info: Dict[str, Any] = Field(default_factory=dict)
+    # User context and preferences
+    user_preferences: UserPreferences = field(default_factory=UserPreferences)
+    device_info: DeviceInfo = field(default_factory=DeviceInfo)
+    location_info: LocationInfo = field(default_factory=LocationInfo)
 
-    # Feature flags (for quick feature checks)
-    features: Dict[str, bool] = Field(default_factory=dict)
+    # Session context for conversation state
+    context: SessionContext = field(default_factory=SessionContext)
 
-    # Current conversation state
-    current_state: Optional[str] = None
-    current_intent: Optional[str] = None
+    # Security metadata
+    security: SecurityMetadata = field(default_factory=SecurityMetadata)
 
-    # Activity tracking
-    message_count: int = Field(default=0, ge=0)
-    idle_start: Optional[datetime] = None
+    # Business context
+    customer_tier: Optional[str] = None
+    subscription_type: Optional[str] = None
+    feature_flags: Dict[str, bool] = field(default_factory=dict)
+
+    # Session metadata
+    session_tags: List[str] = field(default_factory=list)
+    custom_data: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def get_cache_key(tenant_id: TenantId, session_id: SessionId) -> str:
-        """Generate Redis cache key for session"""
+        """
+        Generate Redis cache key for session
+
+        Args:
+            tenant_id: Tenant identifier
+            session_id: Session identifier
+
+        Returns:
+            Redis cache key
+        """
         return f"session:{tenant_id}:{session_id}"
 
     @staticmethod
     def get_user_sessions_key(tenant_id: TenantId, user_id: UserId) -> str:
-        """Generate Redis key for user's active sessions list"""
+        """
+        Generate Redis key for user sessions index
+
+        Args:
+            tenant_id: Tenant identifier
+            user_id: User identifier
+
+        Returns:
+            Redis key for user sessions index
+        """
         return f"user_sessions:{tenant_id}:{user_id}"
 
-    @staticmethod
-    def get_conversation_session_key(tenant_id: TenantId, conversation_id: ConversationId) -> str:
-        """Generate Redis key for conversation to session mapping"""
-        return f"conv_session:{tenant_id}:{conversation_id}"
+    def to_redis_hash(self) -> Dict[str, str]:
+        """
+        Convert to Redis hash format (all string values)
 
-    def update_activity(self) -> None:
-        """Update last activity timestamp and clear idle state"""
-        self.last_activity = datetime.utcnow()
-        self.idle_start = None
-        self.update_timestamp()
+        Returns:
+            Dictionary with string values for Redis hash storage
+        """
+        data = {}
 
-    def mark_idle(self) -> None:
-        """Mark session as idle"""
-        if not self.idle_start:
-            self.idle_start = datetime.utcnow()
+        # Core fields
+        data['session_id'] = self.session_id
+        data['tenant_id'] = self.tenant_id
+        data['user_id'] = self.user_id
+        data['status'] = self.status.value
+        data['channel'] = self.channel.value
+
+        # Timestamps
+        data['created_at'] = self.created_at.isoformat()
+        data['last_activity_at'] = self.last_activity_at.isoformat()
+        data['expires_at'] = self.expires_at.isoformat()
+
+        # Optional fields
+        data['conversation_id'] = self.conversation_id or ""
+        data['customer_tier'] = self.customer_tier or ""
+        data['subscription_type'] = self.subscription_type or ""
+
+        # Complex objects as JSON
+        data['user_preferences'] = json.dumps(self.user_preferences.to_dict())
+        data['device_info'] = json.dumps(self.device_info.to_dict())
+        data['location_info'] = json.dumps(self.location_info.to_dict())
+        data['context'] = json.dumps(self.context.to_dict())
+        data['security'] = json.dumps(self.security.to_dict())
+        data['feature_flags'] = json.dumps(self.feature_flags)
+        data['session_tags'] = json.dumps(self.session_tags)
+        data['custom_data'] = json.dumps(self.custom_data)
+
+        return data
+
+    @classmethod
+    def from_redis_hash(cls, data: Dict[str, str]) -> "SessionData":
+        """
+        Create from Redis hash data
+
+        Args:
+            data: Redis hash data with string values
+
+        Returns:
+            SessionData instance
+        """
+        try:
+            # Parse core fields
+            session_data = {
+                'session_id': data['session_id'],
+                'tenant_id': data['tenant_id'],
+                'user_id': data['user_id'],
+                'status': SessionStatus(data['status']),
+                'channel': ChannelType(data['channel'])
+            }
+
+            # Parse timestamps
+            session_data['created_at'] = datetime.fromisoformat(data['created_at'])
+            session_data['last_activity_at'] = datetime.fromisoformat(data['last_activity_at'])
+            session_data['expires_at'] = datetime.fromisoformat(data['expires_at'])
+
+            # Parse optional fields
+            if data.get('conversation_id'):
+                session_data['conversation_id'] = data['conversation_id']
+            if data.get('customer_tier'):
+                session_data['customer_tier'] = data['customer_tier']
+            if data.get('subscription_type'):
+                session_data['subscription_type'] = data['subscription_type']
+
+            # Parse complex objects
+            if data.get('user_preferences'):
+                prefs_data = json.loads(data['user_preferences'])
+                session_data['user_preferences'] = UserPreferences.from_dict(prefs_data)
+
+            if data.get('device_info'):
+                device_data = json.loads(data['device_info'])
+                session_data['device_info'] = DeviceInfo.from_dict(device_data)
+
+            if data.get('location_info'):
+                location_data = json.loads(data['location_info'])
+                session_data['location_info'] = LocationInfo.from_dict(location_data)
+
+            if data.get('context'):
+                context_data = json.loads(data['context'])
+                session_data['context'] = SessionContext.from_dict(context_data)
+
+            if data.get('security'):
+                security_data = json.loads(data['security'])
+                session_data['security'] = SecurityMetadata.from_dict(security_data)
+
+            if data.get('feature_flags'):
+                session_data['feature_flags'] = json.loads(data['feature_flags'])
+
+            if data.get('session_tags'):
+                session_data['session_tags'] = json.loads(data['session_tags'])
+
+            if data.get('custom_data'):
+                session_data['custom_data'] = json.loads(data['custom_data'])
+
+            return cls(**session_data)
+
+        except Exception as e:
+            logger.error("Failed to deserialize session data", error=str(e), data_keys=list(data.keys()))
+            raise ValueError(f"Failed to deserialize session data: {e}")
 
     def is_expired(self) -> bool:
-        """Check if session is expired"""
+        """
+        Check if session is expired
+
+        Returns:
+            True if session is expired
+        """
         return datetime.utcnow() > self.expires_at
 
-    def is_idle(self, minutes: int = 30) -> bool:
-        """Check if session is idle for specified minutes"""
-        if not self.last_activity:
-            return True
-
-        idle_threshold = datetime.utcnow() - timedelta(minutes=minutes)
-        return self.last_activity < idle_threshold
+    def update_activity(self) -> None:
+        """Update last activity timestamp"""
+        self.last_activity_at = datetime.utcnow()
 
     def extend_session(self, hours: int = 1) -> None:
-        """Extend session expiration"""
+        """
+        Extend session expiration
+
+        Args:
+            hours: Number of hours to extend
+        """
         self.expires_at = datetime.utcnow() + timedelta(hours=hours)
         self.update_activity()
 
-    def increment_message_count(self) -> None:
-        """Increment message counter"""
-        self.message_count += 1
+    def add_context(self, key: str, value: Any) -> None:
+        """
+        Add context data to session
+
+        Args:
+            key: Context key
+            value: Context value
+        """
+        self.context.set_variable(key, value)
         self.update_activity()
 
-    def set_conversation(self, conversation_id: ConversationId) -> None:
-        """Set current conversation ID"""
+    def get_context(self, key: str, default: Any = None) -> Any:
+        """
+        Get context data from session
+
+        Args:
+            key: Context key
+            default: Default value if key not found
+
+        Returns:
+            Context value or default
+        """
+        return self.context.get_variable(key, default)
+
+    def set_conversation(self, conversation_id: str) -> None:
+        """
+        Set current conversation
+
+        Args:
+            conversation_id: Conversation identifier
+        """
         self.conversation_id = conversation_id
+        self.context.conversation_id = conversation_id
         self.update_activity()
 
-    def set_context_value(self, key: str, value: Any) -> None:
-        """Set a context value"""
-        self.context[key] = value
-        self.update_activity()
+    def add_tag(self, tag: str) -> None:
+        """
+        Add tag to session
 
-    def get_context_value(self, key: str, default: Any = None) -> Any:
-        """Get a context value"""
-        return self.context.get(key, default)
+        Args:
+            tag: Tag to add
+        """
+        if tag not in self.session_tags:
+            self.session_tags.append(tag)
 
-    def clear_context_value(self, key: str) -> None:
-        """Clear a context value"""
-        self.context.pop(key, None)
-        self.update_timestamp()
+    def remove_tag(self, tag: str) -> None:
+        """
+        Remove tag from session
 
-    def set_preference(self, key: str, value: Any) -> None:
-        """Set a user preference"""
-        self.preferences[key] = value
-        self.update_timestamp()
+        Args:
+            tag: Tag to remove
+        """
+        if tag in self.session_tags:
+            self.session_tags.remove(tag)
 
-    def get_preference(self, key: str, default: Any = None) -> Any:
-        """Get a user preference"""
-        return self.preferences.get(key, default)
+    def has_tag(self, tag: str) -> bool:
+        """
+        Check if session has tag
 
-    def enable_feature(self, feature_name: str) -> None:
-        """Enable a feature flag"""
-        self.features[feature_name] = True
-        self.update_timestamp()
+        Args:
+            tag: Tag to check
 
-    def disable_feature(self, feature_name: str) -> None:
-        """Disable a feature flag"""
-        self.features[feature_name] = False
-        self.update_timestamp()
+        Returns:
+            True if session has tag
+        """
+        return tag in self.session_tags
 
-    def is_feature_enabled(self, feature_name: str, default: bool = False) -> bool:
-        """Check if a feature is enabled"""
-        return self.features.get(feature_name, default)
+    def get_feature_flag(self, flag_name: str, default: bool = False) -> bool:
+        """
+        Get feature flag value
+
+        Args:
+            flag_name: Feature flag name
+            default: Default value if flag not set
+
+        Returns:
+            Feature flag value
+        """
+        return self.feature_flags.get(flag_name, default)
+
+    def set_feature_flag(self, flag_name: str, value: bool) -> None:
+        """
+        Set feature flag value
+
+        Args:
+            flag_name: Feature flag name
+            value: Feature flag value
+        """
+        self.feature_flags[flag_name] = value
 
     def get_ttl_seconds(self) -> int:
-        """Get TTL in seconds for Redis expiration"""
-        if self.is_expired():
-            return 0
+        """
+        Calculate TTL in seconds
 
+        Returns:
+            TTL in seconds (0 if expired)
+        """
         delta = self.expires_at - datetime.utcnow()
         return max(0, int(delta.total_seconds()))
 
+    def to_dict(self) -> Dict[str, Any]:
+        """
+        Convert to dictionary for API responses
 
-class ConversationState(BaseRedisModel):
-    """
-    Redis cache structure for conversation state.
-    Optimized for conversation flow management and state transitions.
-    """
-
-    # Core identifiers
-    conversation_id: ConversationId
-    tenant_id: TenantId
-    session_id: Optional[SessionId] = None
-
-    # Flow state
-    current_state: Optional[str] = None
-    previous_state: Optional[str] = None
-    flow_id: Optional[str] = None
-
-    # Intent and entity tracking
-    intent_stack: List[str] = Field(default_factory=list, max_items=10)
-    current_intent: Optional[str] = None
-    intent_confidence: Optional[float] = Field(None, ge=0, le=1)
-
-    # Slot and entity management
-    slots: Dict[str, Any] = Field(default_factory=dict)
-    entities: Dict[str, Any] = Field(default_factory=dict)
-
-    # Context variables
-    variables: Dict[str, Any] = Field(default_factory=dict)
-
-    # Flow execution metadata
-    turn_count: int = Field(default=0, ge=0)
-    last_user_input: Optional[str] = None
-    next_expected_inputs: List[str] = Field(default_factory=list, max_items=5)
-
-    # Processing state
-    processing_lock: bool = Field(default=False)
-    processing_node: Optional[str] = None
-    processing_started: Optional[datetime] = None
-
-    @staticmethod
-    def get_cache_key(tenant_id: TenantId, conversation_id: ConversationId) -> str:
-        """Generate Redis cache key for conversation state"""
-        return f"conversation_state:{tenant_id}:{conversation_id}"
-
-    @staticmethod
-    def get_lock_key(conversation_id: ConversationId) -> str:
-        """Generate Redis lock key for conversation processing"""
-        return f"conv_lock:{conversation_id}"
-
-    def push_intent(self, intent: str, confidence: Optional[float] = None) -> None:
-        """Push new intent to stack"""
-        if intent != self.current_intent:
-            if self.current_intent:
-                self.intent_stack.append(self.current_intent)
-
-            # Keep stack limited to last 10 intents
-            if len(self.intent_stack) > 10:
-                self.intent_stack = self.intent_stack[-10:]
-
-        self.current_intent = intent
-        self.intent_confidence = confidence
-        self.update_timestamp()
-
-    def pop_intent(self) -> Optional[str]:
-        """Pop previous intent from stack"""
-        if self.intent_stack:
-            previous_intent = self.intent_stack.pop()
-            self.current_intent = previous_intent
-            self.update_timestamp()
-            return previous_intent
-        return None
-
-    def transition_state(self, new_state: str) -> None:
-        """Transition to new conversation state"""
-        self.previous_state = self.current_state
-        self.current_state = new_state
-        self.turn_count += 1
-        self.update_timestamp()
-
-    def set_slot(self, slot_name: str, value: Any) -> None:
-        """Set slot value"""
-        self.slots[slot_name] = value
-        self.update_timestamp()
-
-    def get_slot(self, slot_name: str, default: Any = None) -> Any:
-        """Get slot value"""
-        return self.slots.get(slot_name, default)
-
-    def clear_slot(self, slot_name: str) -> None:
-        """Clear slot value"""
-        self.slots.pop(slot_name, None)
-        self.update_timestamp()
-
-    def has_required_slots(self, required_slots: List[str]) -> bool:
-        """Check if all required slots are filled"""
-        return all(slot in self.slots and self.slots[slot] is not None for slot in required_slots)
-
-    def set_entity(self, entity_type: str, entity_value: Any) -> None:
-        """Set entity value"""
-        self.entities[entity_type] = entity_value
-        self.update_timestamp()
-
-    def get_entity(self, entity_type: str, default: Any = None) -> Any:
-        """Get entity value"""
-        return self.entities.get(entity_type, default)
-
-    def set_variable(self, var_name: str, value: Any) -> None:
-        """Set context variable"""
-        self.variables[var_name] = value
-        self.update_timestamp()
-
-    def get_variable(self, var_name: str, default: Any = None) -> Any:
-        """Get context variable"""
-        return self.variables.get(var_name, default)
-
-    def acquire_processing_lock(self, processing_node: str, timeout_seconds: int = 30) -> bool:
-        """Acquire processing lock for conversation"""
-        if self.processing_lock and self.processing_started:
-            # Check if lock has timed out
-            timeout = self.processing_started + timedelta(seconds=timeout_seconds)
-            if datetime.utcnow() > timeout:
-                self.release_processing_lock()
-            else:
-                return False  # Lock is still active
-
-        self.processing_lock = True
-        self.processing_node = processing_node
-        self.processing_started = datetime.utcnow()
-        self.update_timestamp()
-        return True
-
-    def release_processing_lock(self) -> None:
-        """Release processing lock"""
-        self.processing_lock = False
-        self.processing_node = None
-        self.processing_started = None
-        self.update_timestamp()
-
-    def is_processing_locked(self) -> bool:
-        """Check if conversation is processing locked"""
-        return self.processing_lock
-
-    def set_expected_inputs(self, inputs: List[str]) -> None:
-        """Set next expected user inputs"""
-        self.next_expected_inputs = inputs[:5]  # Limit to 5
-        self.update_timestamp()
-
-    def clear_expected_inputs(self) -> None:
-        """Clear expected inputs"""
-        self.next_expected_inputs = []
-        self.update_timestamp()
-
-    def reset_conversation(self) -> None:
-        """Reset conversation state for new conversation"""
-        self.current_state = None
-        self.previous_state = None
-        self.intent_stack = []
-        self.current_intent = None
-        self.intent_confidence = None
-        self.slots = {}
-        self.entities = {}
-        self.variables = {}
-        self.turn_count = 0
-        self.next_expected_inputs = []
-        self.release_processing_lock()
-        self.update_timestamp()
-
-
-class ActiveConversations(BaseRedisModel):
-    """
-    Redis structure for tracking active conversations per tenant.
-    Optimized for quick lookups and conversation management.
-    """
-
-    tenant_id: TenantId
-    active_conversations: Dict[str, Dict[str, Any]] = Field(default_factory=dict)  # conv_id -> metadata
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
-
-    @staticmethod
-    def get_cache_key(tenant_id: TenantId) -> str:
-        """Generate Redis cache key for active conversations"""
-        return f"active_conversations:{tenant_id}"
-
-    def add_conversation(
-            self,
-            conversation_id: ConversationId,
-            user_id: UserId,
-            channel: str,
-            started_at: Optional[datetime] = None
-    ) -> None:
-        """Add a conversation to active list"""
-        self.active_conversations[conversation_id] = {
-            "user_id": user_id,
-            "channel": channel,
-            "started_at": (started_at or datetime.utcnow()).isoformat(),
-            "last_activity": datetime.utcnow().isoformat()
+        Returns:
+            Dictionary representation
+        """
+        return {
+            'session_id': self.session_id,
+            'tenant_id': self.tenant_id,
+            'user_id': self.user_id,
+            'status': self.status.value,
+            'channel': self.channel.value,
+            'created_at': self.created_at.isoformat(),
+            'last_activity_at': self.last_activity_at.isoformat(),
+            'expires_at': self.expires_at.isoformat(),
+            'conversation_id': self.conversation_id,
+            'customer_tier': self.customer_tier,
+            'subscription_type': self.subscription_type,
+            'user_preferences': self.user_preferences.to_dict(),
+            'device_info': self.device_info.to_dict(),
+            'location_info': self.location_info.to_dict(),
+            'context': self.context.to_dict(),
+            'security': self.security.to_dict(),
+            'feature_flags': self.feature_flags,
+            'session_tags': self.session_tags,
+            'custom_data': self.custom_data,
+            'ttl_seconds': self.get_ttl_seconds(),
+            'is_expired': self.is_expired()
         }
-        self.last_updated = datetime.utcnow()
-        self.update_timestamp()
-
-    def remove_conversation(self, conversation_id: ConversationId) -> None:
-        """Remove conversation from active list"""
-        self.active_conversations.pop(conversation_id, None)
-        self.last_updated = datetime.utcnow()
-        self.update_timestamp()
-
-    def update_conversation_activity(self, conversation_id: ConversationId) -> None:
-        """Update last activity for a conversation"""
-        if conversation_id in self.active_conversations:
-            self.active_conversations[conversation_id]["last_activity"] = datetime.utcnow().isoformat()
-            self.last_updated = datetime.utcnow()
-            self.update_timestamp()
-
-    def get_conversation_count(self) -> int:
-        """Get count of active conversations"""
-        return len(self.active_conversations)
-
-    def get_conversations_by_user(self, user_id: UserId) -> List[str]:
-        """Get conversation IDs for a specific user"""
-        return [
-            conv_id for conv_id, metadata in self.active_conversations.items()
-            if metadata.get("user_id") == user_id
-        ]
-
-    def get_conversations_by_channel(self, channel: str) -> List[str]:
-        """Get conversation IDs for a specific channel"""
-        return [
-            conv_id for conv_id, metadata in self.active_conversations.items()
-            if metadata.get("channel") == channel
-        ]
-
-    def cleanup_stale_conversations(self, hours: int = 24) -> List[str]:
-        """Remove stale conversations and return their IDs"""
-        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
-        stale_conversations = []
-
-        for conv_id, metadata in list(self.active_conversations.items()):
-            last_activity_str = metadata.get("last_activity")
-            if last_activity_str:
-                try:
-                    last_activity = datetime.fromisoformat(last_activity_str)
-                    if last_activity < cutoff_time:
-                        stale_conversations.append(conv_id)
-                        del self.active_conversations[conv_id]
-                except ValueError:
-                    # Invalid datetime, remove conversation
-                    stale_conversations.append(conv_id)
-                    del self.active_conversations[conv_id]
-
-        if stale_conversations:
-            self.last_updated = datetime.utcnow()
-            self.update_timestamp()
-
-        return stale_conversations
 
 
-# Utility functions for Redis operations
-class SessionCacheManager:
+# Utility functions for session management
+def create_session(
+        tenant_id: TenantId,
+        user_id: UserId,
+        channel: ChannelType = ChannelType.WEB,
+        ttl_hours: int = 1,
+        **kwargs
+) -> SessionData:
     """
-    Utility class for managing session cache operations.
-    Provides high-level methods for session management.
+    Create a new session with default values
+
+    Args:
+        tenant_id: Tenant identifier
+        user_id: User identifier
+        channel: Communication channel
+        ttl_hours: Session TTL in hours
+        **kwargs: Additional session data
+
+    Returns:
+        New SessionData instance
     """
+    import uuid
 
-    @staticmethod
-    def generate_session_fingerprint(
-            user_agent: Optional[str],
-            ip_address: Optional[str],
-            additional_data: Optional[Dict[str, str]] = None
-    ) -> str:
-        """Generate a session fingerprint for security"""
-        fingerprint_data = []
+    session_id = str(uuid.uuid4())
+    expires_at = datetime.utcnow() + timedelta(hours=ttl_hours)
 
-        if user_agent:
-            fingerprint_data.append(user_agent)
-        if ip_address:
-            fingerprint_data.append(ip_address)
-        if additional_data:
-            for key in sorted(additional_data.keys()):
-                fingerprint_data.append(f"{key}:{additional_data[key]}")
+    session_data = SessionData(
+        session_id=session_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        channel=channel,
+        expires_at=expires_at,
+        **kwargs
+    )
 
-        # Hash the combined data
-        combined = "|".join(fingerprint_data)
-        return hashlib.sha256(combined.encode()).hexdigest()
-
-    @staticmethod
-    def calculate_session_ttl(
-            last_activity: datetime,
-            max_idle_minutes: int = 30,
-            max_session_hours: int = 24
-    ) -> int:
-        """Calculate appropriate TTL for session cache"""
-        now = datetime.utcnow()
-
-        # Calculate time since last activity
-        idle_time = now - last_activity
-        max_idle = timedelta(minutes=max_idle_minutes)
-
-        # If idle time exceeds max, session should expire soon
-        if idle_time > max_idle:
-            return 60  # 1 minute TTL for cleanup
-
-        # Calculate remaining time based on max session duration
-        session_start = last_activity  # Approximate
-        session_duration = now - session_start
-        max_duration = timedelta(hours=max_session_hours)
-
-        remaining = max_duration - session_duration
-        if remaining.total_seconds() <= 0:
-            return 60  # 1 minute TTL for cleanup
-
-        # Return TTL in seconds, minimum 5 minutes
-        return max(300, int(remaining.total_seconds()))
-
-    @staticmethod
-    def validate_session_data(session_data: Dict[str, str]) -> bool:
-        """Validate session data integrity"""
-        required_fields = ["session_id", "tenant_id", "user_id", "channel"]
-
-        for field in required_fields:
-            if field not in session_data or not session_data[field]:
-                return False
-
-        # Validate timestamps
-        timestamp_fields = ["created_at", "updated_at", "last_activity", "expires_at"]
-        for field in timestamp_fields:
-            if field in session_data:
-                try:
-                    datetime.fromisoformat(session_data[field])
-                except ValueError:
-                    return False
-
-        return True
+    return session_data
 
 
-# Export classes and utilities
-__all__ = [
-    "SessionCache",
-    "ConversationState",
-    "ActiveConversations",
-    "SessionCacheManager"
-]
+def parse_user_agent(user_agent: str) -> DeviceInfo:
+    """
+    Parse user agent string to extract device information
+
+    Args:
+        user_agent: User agent string
+
+    Returns:
+        DeviceInfo instance
+    """
+    # This is a simplified parser - in production you'd use a library like user-agents
+    device_info = DeviceInfo(user_agent=user_agent)
+
+    if user_agent:
+        user_agent_lower = user_agent.lower()
+
+        # Detect device type
+        if any(mobile in user_agent_lower for mobile in ['mobile', 'android', 'iphone']):
+            device_info.device_type = "mobile"
+        elif 'tablet' in user_agent_lower or 'ipad' in user_agent_lower:
+            device_info.device_type = "tablet"
+        else:
+            device_info.device_type = "desktop"
+
+        # Detect browser
+        if 'chrome' in user_agent_lower:
+            device_info.browser = "Chrome"
+        elif 'firefox' in user_agent_lower:
+            device_info.browser = "Firefox"
+        elif 'safari' in user_agent_lower:
+            device_info.browser = "Safari"
+        elif 'edge' in user_agent_lower:
+            device_info.browser = "Edge"
+
+        # Detect OS
+        if 'windows' in user_agent_lower:
+            device_info.operating_system = "Windows"
+        elif 'mac' in user_agent_lower:
+            device_info.operating_system = "macOS"
+        elif 'linux' in user_agent_lower:
+            device_info.operating_system = "Linux"
+        elif 'android' in user_agent_lower:
+            device_info.operating_system = "Android"
+        elif 'ios' in user_agent_lower or 'iphone' in user_agent_lower:
+            device_info.operating_system = "iOS"
+
+    return device_info

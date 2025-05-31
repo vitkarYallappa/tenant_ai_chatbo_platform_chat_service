@@ -1,387 +1,554 @@
-# src/database/mongodb.py
 """
-MongoDB connection manager and client setup.
-Provides async MongoDB client with connection pooling and health monitoring.
+MongoDB Connection Management
+============================
+
+Centralized MongoDB connection management with connection pooling,
+health monitoring, and configuration management.
+
+Features:
+- Connection pooling with optimal settings
+- Health monitoring and reconnection logic
+- Index management and optimization
+- Multi-tenant database isolation options
+- Performance monitoring
+- Graceful connection handling
 """
 
-from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase, AsyncIOMotorCollection
-from pymongo.errors import ServerSelectionTimeoutError, ConnectionFailure, OperationFailure
-from pymongo import IndexModel, ASCENDING, DESCENDING, TEXT
-from typing import Optional, List, Dict, Any
-import structlog
 import asyncio
-from datetime import datetime
+from typing import Optional, Dict, Any, List
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo import MongoClient, IndexModel, ASCENDING, DESCENDING, TEXT
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+import structlog
+from dataclasses import dataclass, field
+import os
+from urllib.parse import quote_plus
 
-# Note: This would normally import from settings, but since it's not yet available:
-# from src.config.settings import get_settings
-
-logger = structlog.get_logger()
+logger = structlog.get_logger(__name__)
 
 
-class MongoDBManager:
-    """
-    MongoDB connection manager with connection pooling and health monitoring.
-    Handles connection lifecycle, index creation, and database operations.
-    """
+@dataclass
+class MongoDBConfig:
+    """MongoDB configuration with secure defaults"""
+    # Connection settings
+    host: str = "localhost"
+    port: int = 27017
+    database_name: str = "chatbot_platform"
+    username: Optional[str] = None
+    password: Optional[str] = None
+    auth_source: str = "admin"
 
-    def __init__(self):
-        self.client: Optional[AsyncIOMotorClient] = None
-        self.database: Optional[AsyncIOMotorDatabase] = None
-        # self.settings = get_settings()  # Will be available after config setup
+    # Connection pool settings
+    max_pool_size: int = 100
+    min_pool_size: int = 10
+    max_idle_time_ms: int = 30000
 
-        # Default settings (will be replaced by actual config)
-        self.mongodb_uri = "mongodb://localhost:27017"
-        self.database_name = "chatbot_platform"
-        self.max_pool_size = 100
-        self.server_selection_timeout_ms = 5000
-        self.connect_timeout_ms = 10000
-        self.socket_timeout_ms = 20000
+    # Timeout settings
+    connect_timeout_ms: int = 10000
+    socket_timeout_ms: int = 5000
+    server_selection_timeout_ms: int = 5000
 
-    async def connect(self) -> None:
+    # Reliability settings
+    retry_writes: bool = True
+    retry_reads: bool = True
+    read_preference: str = "primary"
+
+    # TLS/SSL settings
+    tls: bool = False
+    tls_cert_reqs: str = "CERT_REQUIRED"
+    tls_ca_file: Optional[str] = None
+    tls_cert_file: Optional[str] = None
+    tls_key_file: Optional[str] = None
+
+    # Advanced settings
+    replica_set: Optional[str] = None
+    read_concern_level: str = "local"
+    write_concern_w: int = 1
+    write_concern_j: bool = True
+
+    # Environment-based overrides
+    def __post_init__(self):
+        """Override with environment variables if available"""
+        self.host = os.getenv("MONGODB_HOST", self.host)
+        self.port = int(os.getenv("MONGODB_PORT", str(self.port)))
+        self.database_name = os.getenv("MONGODB_DATABASE", self.database_name)
+        self.username = os.getenv("MONGODB_USERNAME", self.username)
+        self.password = os.getenv("MONGODB_PASSWORD", self.password)
+        self.replica_set = os.getenv("MONGODB_REPLICA_SET", self.replica_set)
+
+        # TLS settings from environment
+        if os.getenv("MONGODB_TLS", "").lower() in ("true", "1", "yes"):
+            self.tls = True
+        self.tls_ca_file = os.getenv("MONGODB_TLS_CA_FILE", self.tls_ca_file)
+        self.tls_cert_file = os.getenv("MONGODB_TLS_CERT_FILE", self.tls_cert_file)
+        self.tls_key_file = os.getenv("MONGODB_TLS_KEY_FILE", self.tls_key_file)
+
+    def get_connection_string(self) -> str:
         """
-        Establish MongoDB connection with optimal settings for production.
-
-        Raises:
-            ConnectionError: If connection fails
-        """
-        try:
-            self.client = AsyncIOMotorClient(
-                self.mongodb_uri,
-                maxPoolSize=self.max_pool_size,
-                serverSelectionTimeoutMS=self.server_selection_timeout_ms,
-                connectTimeoutMS=self.connect_timeout_ms,
-                socketTimeoutMS=self.socket_timeout_ms,
-                retryWrites=True,
-                w="majority",
-                readPreference="secondaryPreferred",
-                readConcern="majority"
-            )
-
-            # Test connection with admin ping
-            await self.client.admin.command('ping')
-
-            self.database = self.client[self.database_name]
-
-            logger.info(
-                "MongoDB connected successfully",
-                database=self.database_name,
-                max_pool_size=self.max_pool_size,
-                uri_host=self.mongodb_uri.split('@')[-1] if '@' in self.mongodb_uri else self.mongodb_uri
-            )
-
-            # Create indexes after connection
-            await self.create_indexes()
-
-        except ServerSelectionTimeoutError as e:
-            logger.error("MongoDB server selection timeout", error=str(e))
-            raise ConnectionError(f"MongoDB connection timeout: {e}")
-        except ConnectionFailure as e:
-            logger.error("MongoDB connection failure", error=str(e))
-            raise ConnectionError(f"MongoDB connection failed: {e}")
-        except Exception as e:
-            logger.error("Unexpected MongoDB connection error", error=str(e))
-            raise ConnectionError(f"MongoDB connection error: {e}")
-
-    async def disconnect(self) -> None:
-        """Close MongoDB connection gracefully."""
-        if self.client:
-            self.client.close()
-            # Wait for connection to close
-            await asyncio.sleep(0.1)
-            logger.info("MongoDB connection closed")
-
-    def get_database(self) -> AsyncIOMotorDatabase:
-        """
-        Get database instance.
+        Build MongoDB connection string
 
         Returns:
-            AsyncIOMotorDatabase instance
+            MongoDB URI string
+        """
+        # Build base URI
+        if self.username and self.password:
+            # URL encode username and password to handle special characters
+            encoded_username = quote_plus(self.username)
+            encoded_password = quote_plus(self.password)
+            auth_part = f"{encoded_username}:{encoded_password}@"
+        else:
+            auth_part = ""
+
+        # Build host part
+        if self.replica_set:
+            # For replica sets, you might have multiple hosts
+            host_part = f"{self.host}:{self.port}"
+        else:
+            host_part = f"{self.host}:{self.port}"
+
+        # Build URI
+        uri = f"mongodb://{auth_part}{host_part}/{self.database_name}"
+
+        # Add query parameters
+        params = []
+
+        if self.auth_source:
+            params.append(f"authSource={self.auth_source}")
+
+        if self.replica_set:
+            params.append(f"replicaSet={self.replica_set}")
+
+        params.extend([
+            f"maxPoolSize={self.max_pool_size}",
+            f"minPoolSize={self.min_pool_size}",
+            f"maxIdleTimeMS={self.max_idle_time_ms}",
+            f"connectTimeoutMS={self.connect_timeout_ms}",
+            f"socketTimeoutMS={self.socket_timeout_ms}",
+            f"serverSelectionTimeoutMS={self.server_selection_timeout_ms}",
+            f"retryWrites={str(self.retry_writes).lower()}",
+            f"retryReads={str(self.retry_reads).lower()}",
+            f"readPreference={self.read_preference}"
+        ])
+
+        if self.tls:
+            params.append("tls=true")
+            params.append(f"tlsCertificateKeyFile={self.tls_cert_file}")
+            if self.tls_ca_file:
+                params.append(f"tlsCAFile={self.tls_ca_file}")
+
+        if params:
+            uri += "?" + "&".join(params)
+
+        return uri
+
+    def get_client_options(self) -> Dict[str, Any]:
+        """
+        Get client options for AsyncIOMotorClient
+
+        Returns:
+            Dictionary of client options
+        """
+        options = {
+            'maxPoolSize': self.max_pool_size,
+            'minPoolSize': self.min_pool_size,
+            'maxIdleTimeMS': self.max_idle_time_ms,
+            'connectTimeoutMS': self.connect_timeout_ms,
+            'socketTimeoutMS': self.socket_timeout_ms,
+            'serverSelectionTimeoutMS': self.server_selection_timeout_ms,
+            'retryWrites': self.retry_writes,
+            'retryReads': self.retry_reads
+        }
+
+        if self.tls:
+            options.update({
+                'tls': True,
+                'tlsCertificateKeyFile': self.tls_cert_file,
+                'tlsCAFile': self.tls_ca_file
+            })
+
+        return options
+
+
+class MongoDBConnectionManager:
+    """
+    MongoDB connection manager with health monitoring and reconnection logic
+    """
+
+    def __init__(self, config: MongoDBConfig):
+        """
+        Initialize connection manager
+
+        Args:
+            config: MongoDB configuration
+        """
+        self.config = config
+        self.client: Optional[AsyncIOMotorClient] = None
+        self.database: Optional[AsyncIOMotorDatabase] = None
+        self._connection_lock = asyncio.Lock()
+        self._health_check_task: Optional[asyncio.Task] = None
+        self._is_healthy = False
+
+    async def connect(self) -> AsyncIOMotorDatabase:
+        """
+        Establish connection to MongoDB
+
+        Returns:
+            MongoDB database instance
 
         Raises:
-            RuntimeError: If database not connected
+            ConnectionFailure: If connection cannot be established
         """
-        if not self.database:
-            raise RuntimeError("MongoDB database not connected. Call connect() first.")
+        async with self._connection_lock:
+            if self.client is None:
+                try:
+                    logger.info("Connecting to MongoDB", host=self.config.host, database=self.config.database_name)
+
+                    # Create client with connection string
+                    connection_string = self.config.get_connection_string()
+                    self.client = AsyncIOMotorClient(connection_string)
+
+                    # Get database
+                    self.database = self.client[self.config.database_name]
+
+                    # Test connection
+                    await self._test_connection()
+
+                    # Start health monitoring
+                    self._start_health_monitoring()
+
+                    self._is_healthy = True
+                    logger.info("Successfully connected to MongoDB")
+
+                except Exception as e:
+                    logger.error("Failed to connect to MongoDB", error=str(e))
+                    await self.disconnect()
+                    raise ConnectionFailure(f"Failed to connect to MongoDB: {e}")
+
+            return self.database
+
+    async def disconnect(self) -> None:
+        """Disconnect from MongoDB"""
+        async with self._connection_lock:
+            if self._health_check_task:
+                self._health_check_task.cancel()
+                try:
+                    await self._health_check_task
+                except asyncio.CancelledError:
+                    pass
+                self._health_check_task = None
+
+            if self.client:
+                self.client.close()
+                self.client = None
+                self.database = None
+                self._is_healthy = False
+
+                logger.info("Disconnected from MongoDB")
+
+    async def get_database(self) -> AsyncIOMotorDatabase:
+        """
+        Get database instance, connecting if necessary
+
+        Returns:
+            MongoDB database instance
+        """
+        if self.database is None or not self._is_healthy:
+            await self.connect()
+
         return self.database
 
-    def get_collection(self, collection_name: str) -> AsyncIOMotorCollection:
+    async def _test_connection(self) -> None:
+        """Test MongoDB connection"""
+        if self.client:
+            # Ping the database
+            await self.client.admin.command('ping')
+
+            # Test database access
+            await self.database.command('ping')
+
+    def _start_health_monitoring(self) -> None:
+        """Start background health monitoring task"""
+        if self._health_check_task is None:
+            self._health_check_task = asyncio.create_task(self._health_monitor())
+
+    async def _health_monitor(self) -> None:
+        """Background health monitoring coroutine"""
+        while True:
+            try:
+                await asyncio.sleep(30)  # Check every 30 seconds
+                await self._test_connection()
+
+                if not self._is_healthy:
+                    self._is_healthy = True
+                    logger.info("MongoDB connection restored")
+
+            except Exception as e:
+                if self._is_healthy:
+                    self._is_healthy = False
+                    logger.error("MongoDB health check failed", error=str(e))
+
+                # Try to reconnect after a delay
+                await asyncio.sleep(5)
+                try:
+                    await self.connect()
+                except Exception as reconnect_error:
+                    logger.error("Failed to reconnect to MongoDB", error=str(reconnect_error))
+
+    async def health_check(self) -> Dict[str, Any]:
         """
-        Get collection instance.
+        Perform comprehensive health check
+
+        Returns:
+            Health status information
+        """
+        health_info = {
+            "connected": False,
+            "healthy": self._is_healthy,
+            "database": self.config.database_name,
+            "host": self.config.host,
+            "port": self.config.port
+        }
+
+        try:
+            if self.client and self.database:
+                # Test connection
+                start_time = asyncio.get_event_loop().time()
+                await self._test_connection()
+                response_time = (asyncio.get_event_loop().time() - start_time) * 1000
+
+                # Get server status
+                server_status = await self.database.command('serverStatus')
+
+                health_info.update({
+                    "connected": True,
+                    "response_time_ms": round(response_time, 2),
+                    "server_version": server_status.get('version', 'unknown'),
+                    "uptime_seconds": server_status.get('uptime', 0),
+                    "connections": server_status.get('connections', {}),
+                    "memory": server_status.get('mem', {}),
+                    "operations": server_status.get('opcounters', {})
+                })
+
+        except Exception as e:
+            health_info.update({
+                "error": str(e),
+                "healthy": False
+            })
+
+        return health_info
+
+
+# Index Management
+class MongoIndexManager:
+    """MongoDB index management utilities"""
+
+    def __init__(self, database: AsyncIOMotorDatabase):
+        """
+        Initialize index manager
+
+        Args:
+            database: MongoDB database instance
+        """
+        self.database = database
+        self.logger = structlog.get_logger("MongoIndexManager")
+
+    async def create_conversation_indexes(self) -> None:
+        """Create indexes for conversations collection"""
+        collection = self.database.conversations
+
+        indexes = [
+            # Tenant and conversation lookup
+            IndexModel([("tenant_id", ASCENDING), ("conversation_id", ASCENDING)], unique=True),
+            IndexModel([("conversation_id", ASCENDING)], unique=True),
+
+            # User and tenant queries
+            IndexModel([("tenant_id", ASCENDING), ("user_id", ASCENDING), ("started_at", DESCENDING)]),
+            IndexModel([("tenant_id", ASCENDING), ("status", ASCENDING), ("last_activity_at", DESCENDING)]),
+
+            # Channel and status filtering
+            IndexModel([("tenant_id", ASCENDING), ("channel", ASCENDING), ("started_at", DESCENDING)]),
+            IndexModel([("tenant_id", ASCENDING), ("status", ASCENDING)]),
+
+            # Business context queries
+            IndexModel([("tenant_id", ASCENDING), ("business_context.category", ASCENDING)]),
+            IndexModel([("tenant_id", ASCENDING), ("business_context.outcome", ASCENDING)]),
+
+            # Flow and state management
+            IndexModel([("flow_id", ASCENDING), ("current_state", ASCENDING)]),
+
+            # Date-based queries
+            IndexModel([("started_at", DESCENDING)]),
+            IndexModel([("last_activity_at", DESCENDING)]),
+
+            # Cleanup and retention
+            IndexModel([("compliance.data_retention_until", ASCENDING)]),
+
+            # Text search
+            IndexModel([("$**", TEXT)], name="text_search_index")
+        ]
+
+        try:
+            await collection.create_indexes(indexes)
+            self.logger.info("Conversation indexes created successfully")
+        except Exception as e:
+            self.logger.error("Failed to create conversation indexes", error=str(e))
+            raise
+
+    async def create_message_indexes(self) -> None:
+        """Create indexes for messages collection"""
+        collection = self.database.messages
+
+        indexes = [
+            # Message lookup and conversation queries
+            IndexModel([("conversation_id", ASCENDING), ("sequence_number", ASCENDING)]),
+            IndexModel([("message_id", ASCENDING)], unique=True),
+            IndexModel([("tenant_id", ASCENDING), ("timestamp", DESCENDING)]),
+
+            # Direction and type filtering
+            IndexModel([("tenant_id", ASCENDING), ("direction", ASCENDING), ("timestamp", DESCENDING)]),
+            IndexModel([("content.type", ASCENDING), ("timestamp", DESCENDING)]),
+
+            # AI analysis queries
+            IndexModel([("tenant_id", ASCENDING), ("ai_analysis.intent.detected_intent", ASCENDING)]),
+            IndexModel([("ai_analysis.sentiment.label", ASCENDING), ("timestamp", DESCENDING)]),
+
+            # Moderation and cleanup
+            IndexModel([("moderation.flagged", ASCENDING), ("timestamp", DESCENDING)]),
+            IndexModel([("privacy.auto_delete_at", ASCENDING)]),
+
+            # Performance optimization
+            IndexModel([("conversation_id", ASCENDING), ("direction", ASCENDING), ("sequence_number", ASCENDING)]),
+
+            # Text search
+            IndexModel([("content.text", TEXT)], name="message_text_search")
+        ]
+
+        try:
+            await collection.create_indexes(indexes)
+            self.logger.info("Message indexes created successfully")
+        except Exception as e:
+            self.logger.error("Failed to create message indexes", error=str(e))
+            raise
+
+    async def create_all_indexes(self) -> None:
+        """Create all required indexes"""
+        await self.create_conversation_indexes()
+        await self.create_message_indexes()
+        self.logger.info("All MongoDB indexes created successfully")
+
+    async def list_collection_indexes(self, collection_name: str) -> List[Dict[str, Any]]:
+        """
+        List indexes for a collection
 
         Args:
             collection_name: Name of the collection
 
         Returns:
-            AsyncIOMotorCollection instance
-        """
-        database = self.get_database()
-        return database[collection_name]
-
-    async def health_check(self) -> bool:
-        """
-        Check MongoDB connection health.
-
-        Returns:
-            True if healthy, False otherwise
+            List of index information
         """
         try:
-            if self.client:
-                # Use a short timeout for health checks
-                await self.client.admin.command('ping', maxTimeMS=1000)
-                return True
+            collection = self.database[collection_name]
+            indexes = await collection.list_indexes().to_list(length=None)
+            return indexes
+        except Exception as e:
+            self.logger.error("Failed to list indexes", collection=collection_name, error=str(e))
+            return []
+
+    async def drop_index(self, collection_name: str, index_name: str) -> bool:
+        """
+        Drop an index
+
+        Args:
+            collection_name: Name of the collection
+            index_name: Name of the index
+
+        Returns:
+            True if successful
+        """
+        try:
+            collection = self.database[collection_name]
+            await collection.drop_index(index_name)
+            self.logger.info("Index dropped successfully", collection=collection_name, index=index_name)
+            return True
+        except Exception as e:
+            self.logger.error("Failed to drop index", collection=collection_name, index=index_name, error=str(e))
             return False
-        except Exception as e:
-            logger.error("MongoDB health check failed", error=str(e))
-            return False
-
-    async def get_server_info(self) -> Dict[str, Any]:
-        """
-        Get MongoDB server information.
-
-        Returns:
-            Dictionary with server information
-        """
-        try:
-            if not self.client:
-                return {"status": "disconnected"}
-
-            server_info = await self.client.admin.command('buildInfo')
-            server_status = await self.client.admin.command('serverStatus')
-
-            return {
-                "status": "connected",
-                "version": server_info.get("version"),
-                "uptime": server_status.get("uptime"),
-                "connections": server_status.get("connections", {}),
-                "memory": server_status.get("mem", {}),
-                "operations": server_status.get("opcounters", {})
-            }
-        except Exception as e:
-            logger.error("Failed to get MongoDB server info", error=str(e))
-            return {"status": "error", "error": str(e)}
-
-    async def create_indexes(self) -> None:
-        """Create required database indexes for optimal performance."""
-        if not self.database:
-            logger.warning("Cannot create indexes: database not connected")
-            return
-
-        try:
-            # Conversations collection indexes
-            conversations = self.database.conversations
-            conversation_indexes = [
-                IndexModel([("conversation_id", ASCENDING)], unique=True),
-                IndexModel([("tenant_id", ASCENDING), ("started_at", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("user_id", ASCENDING), ("started_at", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("status", ASCENDING), ("last_activity_at", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("channel", ASCENDING), ("started_at", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("business_context.category", ASCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("business_context.outcome", ASCENDING)]),
-                IndexModel([("compliance.data_retention_until", ASCENDING)]),  # For cleanup
-                IndexModel([("last_activity_at", ASCENDING)]),  # For stale conversation cleanup
-                IndexModel([("ai_metadata.primary_models_used", ASCENDING)]),  # For model usage analytics
-            ]
-            await conversations.create_indexes(conversation_indexes)
-
-            # Messages collection indexes
-            messages = self.database.messages
-            message_indexes = [
-                IndexModel([("message_id", ASCENDING)], unique=True),
-                IndexModel([("conversation_id", ASCENDING), ("sequence_number", ASCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("timestamp", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("direction", ASCENDING), ("timestamp", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("ai_analysis.intent.detected_intent", ASCENDING)]),
-                IndexModel([("content.type", ASCENDING), ("timestamp", DESCENDING)]),
-                IndexModel([("privacy.auto_delete_at", ASCENDING)]),  # For cleanup
-                IndexModel([("moderation.flagged", ASCENDING), ("timestamp", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("channel", ASCENDING), ("timestamp", DESCENDING)]),
-                # Text search index for message content
-                IndexModel([("content.text", TEXT), ("ai_analysis.topics", TEXT)]),
-            ]
-            await messages.create_indexes(message_indexes)
-
-            # Sessions collection indexes
-            sessions = self.database.sessions
-            session_indexes = [
-                IndexModel([("session_id", ASCENDING)], unique=True),
-                IndexModel([("tenant_id", ASCENDING), ("started_at", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("user_id", ASCENDING), ("started_at", DESCENDING)]),
-                IndexModel([("tenant_id", ASCENDING), ("status", ASCENDING)]),
-                IndexModel([("expires_at", ASCENDING)]),  # For cleanup
-                IndexModel([("data_retention_until", ASCENDING)]),  # For compliance cleanup
-                IndexModel([("last_activity_at", ASCENDING)]),  # For idle session detection
-                IndexModel([("security.suspicious_activity", ASCENDING), ("last_activity_at", DESCENDING)]),
-            ]
-            await sessions.create_indexes(session_indexes)
-
-            logger.info("MongoDB indexes created successfully")
-
-        except Exception as e:
-            logger.error("Failed to create MongoDB indexes", error=str(e))
-            # Don't raise exception - indexes are important but not critical for startup
-
-    async def ensure_collection_settings(self) -> None:
-        """Ensure collections have proper settings and validation rules."""
-        if not self.database:
-            return
-
-        try:
-            # Set up collection validation rules
-            conversations_validation = {
-                "validator": {
-                    "$jsonSchema": {
-                        "bsonType": "object",
-                        "required": ["conversation_id", "tenant_id", "user_id", "channel", "status"],
-                        "properties": {
-                            "conversation_id": {"bsonType": "string", "minLength": 1},
-                            "tenant_id": {"bsonType": "string", "minLength": 1},
-                            "user_id": {"bsonType": "string", "minLength": 1},
-                            "channel": {"enum": ["web", "whatsapp", "messenger", "slack", "teams", "sms", "voice"]},
-                            "status": {"enum": ["active", "completed", "abandoned", "escalated", "error"]}
-                        }
-                    }
-                }
-            }
-
-            # Apply validation (this will only work if collection doesn't exist yet)
-            try:
-                await self.database.create_collection("conversations", **conversations_validation)
-            except OperationFailure:
-                # Collection already exists, validation rules can't be changed easily
-                pass
-
-            logger.info("MongoDB collection settings configured")
-
-        except Exception as e:
-            logger.error("Failed to configure collection settings", error=str(e))
-
-    async def cleanup_expired_data(self) -> Dict[str, int]:
-        """
-        Clean up expired data based on retention policies.
-
-        Returns:
-            Dictionary with cleanup counts
-        """
-        cleanup_results = {
-            "conversations_cleaned": 0,
-            "messages_cleaned": 0,
-            "sessions_cleaned": 0
-        }
-
-        if not self.database:
-            return cleanup_results
-
-        try:
-            current_time = datetime.utcnow()
-
-            # Clean up conversations with expired retention
-            conversations = self.database.conversations
-            conv_result = await conversations.delete_many({
-                "compliance.data_retention_until": {"$lt": current_time}
-            })
-            cleanup_results["conversations_cleaned"] = conv_result.deleted_count
-
-            # Clean up messages with expired auto-delete
-            messages = self.database.messages
-            msg_result = await messages.delete_many({
-                "privacy.auto_delete_at": {"$lt": current_time}
-            })
-            cleanup_results["messages_cleaned"] = msg_result.deleted_count
-
-            # Clean up expired sessions
-            sessions = self.database.sessions
-            session_result = await sessions.delete_many({
-                "$or": [
-                    {"expires_at": {"$lt": current_time}},
-                    {"data_retention_until": {"$lt": current_time}}
-                ]
-            })
-            cleanup_results["sessions_cleaned"] = session_result.deleted_count
-
-            if sum(cleanup_results.values()) > 0:
-                logger.info("MongoDB cleanup completed", **cleanup_results)
-
-        except Exception as e:
-            logger.error("MongoDB cleanup failed", error=str(e))
-
-        return cleanup_results
-
-    async def get_collection_stats(self) -> Dict[str, Dict[str, Any]]:
-        """
-        Get statistics for all collections.
-
-        Returns:
-            Dictionary with collection statistics
-        """
-        stats = {}
-
-        if not self.database:
-            return stats
-
-        try:
-            collections = ["conversations", "messages", "sessions"]
-
-            for collection_name in collections:
-                collection = self.database[collection_name]
-
-                # Get collection stats
-                coll_stats = await self.database.command("collStats", collection_name)
-
-                # Get document count
-                doc_count = await collection.count_documents({})
-
-                stats[collection_name] = {
-                    "document_count": doc_count,
-                    "storage_size": coll_stats.get("storageSize", 0),
-                    "total_index_size": coll_stats.get("totalIndexSize", 0),
-                    "avg_obj_size": coll_stats.get("avgObjSize", 0),
-                    "indexes": coll_stats.get("nindexes", 0)
-                }
-
-        except Exception as e:
-            logger.error("Failed to get collection stats", error=str(e))
-
-        return stats
 
 
-# Global MongoDB manager instance
-mongodb_manager = MongoDBManager()
+# Global connection manager instance
+_connection_manager: Optional[MongoDBConnectionManager] = None
+
+
+async def initialize_mongodb(config: Optional[MongoDBConfig] = None) -> AsyncIOMotorDatabase:
+    """
+    Initialize MongoDB connection
+
+    Args:
+        config: MongoDB configuration (uses default if None)
+
+    Returns:
+        MongoDB database instance
+    """
+    global _connection_manager
+
+    if config is None:
+        config = MongoDBConfig()
+
+    if _connection_manager is None:
+        _connection_manager = MongoDBConnectionManager(config)
+
+    return await _connection_manager.connect()
 
 
 async def get_mongodb() -> AsyncIOMotorDatabase:
     """
-    Dependency function to get MongoDB database instance.
+    Get MongoDB database instance
 
     Returns:
-        AsyncIOMotorDatabase instance
+        MongoDB database instance
+
+    Raises:
+        RuntimeError: If MongoDB is not initialized
     """
-    return mongodb_manager.get_database()
+    global _connection_manager
+
+    if _connection_manager is None:
+        # Auto-initialize with default config
+        return await initialize_mongodb()
+
+    return await _connection_manager.get_database()
 
 
-async def get_mongodb_collection(collection_name: str) -> AsyncIOMotorCollection:
+async def close_mongodb() -> None:
+    """Close MongoDB connection"""
+    global _connection_manager
+
+    if _connection_manager:
+        await _connection_manager.disconnect()
+        _connection_manager = None
+
+
+async def mongodb_health_check() -> Dict[str, Any]:
     """
-    Dependency function to get specific MongoDB collection.
-
-    Args:
-        collection_name: Name of the collection
+    Get MongoDB health status
 
     Returns:
-        AsyncIOMotorCollection instance
+        Health check results
     """
-    return mongodb_manager.get_collection(collection_name)
+    global _connection_manager
+
+    if _connection_manager:
+        return await _connection_manager.health_check()
+    else:
+        return {
+            "connected": False,
+            "healthy": False,
+            "error": "MongoDB not initialized"
+        }
 
 
-# Convenience functions for specific collections
-async def get_conversations_collection() -> AsyncIOMotorCollection:
-    """Get conversations collection."""
-    return mongodb_manager.get_collection("conversations")
-
-
-async def get_messages_collection() -> AsyncIOMotorCollection:
-    """Get messages collection."""
-    return mongodb_manager.get_collection("messages")
-
-
-async def get_sessions_collection() -> AsyncIOMotorCollection:
-    """Get sessions collection."""
-    return mongodb_manager.get_collection("sessions")
+async def setup_mongodb_indexes() -> None:
+    """Setup all required MongoDB indexes"""
+    database = await get_mongodb()
+    index_manager = MongoIndexManager(database)
+    await index_manager.create_all_indexes()
