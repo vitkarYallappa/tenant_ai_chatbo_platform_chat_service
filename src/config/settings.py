@@ -10,7 +10,8 @@ from typing import List, Optional, Dict, Any
 from enum import Enum
 from functools import lru_cache
 
-from pydantic import BaseSettings, Field, validator, root_validator
+from pydantic import Field, field_validator, model_validator, FieldValidationInfo
+from pydantic_settings import BaseSettings
 from pydantic.networks import AnyHttpUrl, PostgresDsn, RedisDsn
 
 
@@ -73,7 +74,7 @@ class Settings(BaseSettings):
     )
     LOG_FORMAT: str = Field(
         default="json",
-        regex=r"^(json|text)$",
+        pattern=r"^(json|text)$",
         description="Log output format"
     )
 
@@ -189,7 +190,7 @@ class Settings(BaseSettings):
     )
     JWT_ALGORITHM: str = Field(
         default="HS256",
-        regex=r"^(HS256|HS384|HS512|RS256|RS384|RS512)$",
+        pattern=r"^(HS256|HS384|HS512|RS256|RS384|RS512)$",
         description="JWT signing algorithm"
     )
     JWT_EXPIRE_MINUTES: int = Field(
@@ -318,7 +319,7 @@ class Settings(BaseSettings):
         extra = "forbid"  # Forbid extra fields
 
         # Custom configuration for field descriptions
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "ENVIRONMENT": "development",
                 "HOST": "0.0.0.0",
@@ -329,34 +330,8 @@ class Settings(BaseSettings):
             }
         }
 
-    @validator("DEBUG")
-    def validate_debug_in_production(cls, v, values):
-        """Validate debug mode settings."""
-        environment = values.get("ENVIRONMENT")
-        if environment == Environment.PRODUCTION and v:
-            raise ValueError("Debug mode should not be enabled in production")
-        return v
-
-    @validator("ALLOWED_ORIGINS")
-    def validate_cors_origins_in_production(cls, v, values):
-        """Validate CORS origins in production."""
-        environment = values.get("ENVIRONMENT")
-        if environment == Environment.PRODUCTION and "*" in v:
-            raise ValueError("Wildcard CORS origins not allowed in production")
-        return v
-
-    @validator("JWT_SECRET_KEY")
-    def validate_jwt_secret_strength(cls, v, values):
-        """Validate JWT secret key strength."""
-        environment = values.get("ENVIRONMENT")
-        if environment == Environment.PRODUCTION:
-            if len(v) < 32:
-                raise ValueError("JWT secret key must be at least 32 characters in production")
-            if v == "dev-secret-change-in-production":
-                raise ValueError("Default JWT secret key not allowed in production")
-        return v
-
-    @validator("KAFKA_BROKERS")
+    @field_validator("KAFKA_BROKERS")
+    @classmethod
     def validate_kafka_brokers(cls, v):
         """Validate Kafka broker format."""
         for broker in v:
@@ -364,44 +339,45 @@ class Settings(BaseSettings):
                 raise ValueError(f"Invalid Kafka broker format: {broker}")
         return v
 
-    @validator("MONGODB_MIN_CONNECTIONS")
-    def validate_mongodb_connection_limits(cls, v, values):
-        """Validate MongoDB connection limits."""
-        max_connections = values.get("MONGODB_MAX_CONNECTIONS", 100)
-        if v > max_connections:
-            raise ValueError("MongoDB min connections cannot exceed max connections")
-        return v
-
-    @validator("POSTGRESQL_MIN_CONNECTIONS")
-    def validate_postgresql_connection_limits(cls, v, values):
-        """Validate PostgreSQL connection limits."""
-        max_connections = values.get("POSTGRESQL_MAX_CONNECTIONS", 20)
-        if v > max_connections:
-            raise ValueError("PostgreSQL min connections cannot exceed max connections")
-        return v
-
-    @root_validator
-    def validate_environment_consistency(cls, values):
+    @model_validator(mode='after')
+    def validate_environment_consistency(self):
         """Validate environment-specific consistency."""
-        environment = values.get("ENVIRONMENT")
+        # Production-specific validations
+        if self.ENVIRONMENT == Environment.PRODUCTION:
+            if self.DEBUG:
+                raise ValueError("Debug mode should not be enabled in production")
 
-        if environment == Environment.PRODUCTION:
-            # Production-specific validations
-            if values.get("MOCK_EXTERNAL_SERVICES"):
+            if "*" in self.ALLOWED_ORIGINS:
+                raise ValueError("Wildcard CORS origins not allowed in production")
+
+            if len(self.JWT_SECRET_KEY) < 32:
+                raise ValueError("JWT secret key must be at least 32 characters in production")
+
+            if self.JWT_SECRET_KEY == "dev-secret-change-in-production":
+                raise ValueError("Default JWT secret key not allowed in production")
+
+            if self.MOCK_EXTERNAL_SERVICES:
                 raise ValueError("Mock external services not allowed in production")
 
-            if values.get("RELOAD_ON_CHANGE"):
+            if self.RELOAD_ON_CHANGE:
                 raise ValueError("Auto-reload not allowed in production")
 
-            if not values.get("CACHE_ENABLED"):
+            if not self.CACHE_ENABLED:
                 raise ValueError("Caching should be enabled in production")
 
-        elif environment == Environment.TESTING:
-            # Testing-specific settings
-            values["TESTING"] = True
-            values["MOCK_EXTERNAL_SERVICES"] = True
+        # Testing-specific settings
+        elif self.ENVIRONMENT == Environment.TESTING:
+            self.TESTING = True
+            self.MOCK_EXTERNAL_SERVICES = True
 
-        return values
+        # Connection limit validations
+        if self.MONGODB_MIN_CONNECTIONS > self.MONGODB_MAX_CONNECTIONS:
+            raise ValueError("MongoDB min connections cannot exceed max connections")
+
+        if self.POSTGRESQL_MIN_CONNECTIONS > self.POSTGRESQL_MAX_CONNECTIONS:
+            raise ValueError("PostgreSQL min connections cannot exceed max connections")
+
+        return self
 
     def get_database_url(self, db_type: str) -> str:
         """Get database URL by type."""

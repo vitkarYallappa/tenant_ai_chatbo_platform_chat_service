@@ -244,7 +244,7 @@ def setup_routes(app: FastAPI) -> None:
             "service": SERVICE_NAME,
             "version": app.version,
             "api_version": API_VERSION,
-            "environment": settings.ENVIRONMENT,
+            "environment": settings.ENVIRONMENT.value,  # Convert enum to string
             "debug": settings.DEBUG,
             "docs_url": app.docs_url,
             "openapi_url": app.openapi_url,
@@ -276,12 +276,12 @@ async def startup_event() -> None:
     settings = get_settings()
 
     # Setup logging
-    setup_logging(settings.LOG_LEVEL)
+    setup_logging(settings.LOG_LEVEL.value)  # Convert enum to string
 
     logger.info(
         "Chat Service starting",
         version="2.0.0",
-        environment=settings.ENVIRONMENT,
+        environment=settings.ENVIRONMENT.value,  # Convert enum to string
         debug=settings.DEBUG,
         host=settings.HOST,
         port=settings.PORT
@@ -320,8 +320,8 @@ async def validate_configuration(settings) -> None:
     # Check required settings
     required_settings = [
         ("MONGODB_URI", settings.MONGODB_URI),
-        ("REDIS_URL", settings.REDIS_URL),
-        ("POSTGRESQL_URI", settings.POSTGRESQL_URI),
+        ("REDIS_URL", str(settings.REDIS_URL)),  # Convert to string
+        ("POSTGRESQL_URI", str(settings.POSTGRESQL_URI)),  # Convert to string
     ]
 
     missing_settings = []
@@ -335,7 +335,7 @@ async def validate_configuration(settings) -> None:
         raise ValueError(error_msg)
 
     # Validate environment-specific settings
-    if settings.ENVIRONMENT == "production":
+    if settings.ENVIRONMENT.value == "production":  # Use .value for enum
         if settings.DEBUG:
             logger.warning("Debug mode is enabled in production")
 
@@ -410,7 +410,7 @@ def main() -> None:
             },
         },
         "root": {
-            "level": settings.LOG_LEVEL,
+            "level": settings.LOG_LEVEL.value,  # Convert enum to string
             "handlers": ["default"],
         },
     }
@@ -420,7 +420,7 @@ def main() -> None:
         "app": "src.main:app",
         "host": settings.HOST,
         "port": settings.PORT,
-        "log_level": settings.LOG_LEVEL.lower(),
+        "log_level": settings.LOG_LEVEL.value.lower(),  # Convert enum to string and lowercase
         "access_log": True,
         "log_config": log_config,
         "server_header": False,  # Security: don't expose server info
@@ -428,7 +428,7 @@ def main() -> None:
     }
 
     # Development-specific settings
-    if settings.ENVIRONMENT == "development":
+    if settings.ENVIRONMENT.value == "development":  # Use .value for enum
         uvicorn_config.update({
             "reload": settings.DEBUG,
             "reload_dirs": ["src/"],
@@ -437,7 +437,7 @@ def main() -> None:
         })
 
     # Production-specific settings
-    elif settings.ENVIRONMENT == "production":
+    elif settings.ENVIRONMENT.value == "production":  # Use .value for enum
         uvicorn_config.update({
             "workers": 1,  # Single worker for now, will be configured via deployment
             "loop": "uvloop",
@@ -450,7 +450,7 @@ def main() -> None:
         "Starting Chat Service server",
         host=settings.HOST,
         port=settings.PORT,
-        environment=settings.ENVIRONMENT,
+        environment=settings.ENVIRONMENT.value,  # Convert enum to string
         debug=settings.DEBUG
     )
 
@@ -463,4 +463,3 @@ app = create_app()
 
 if __name__ == "__main__":
     main()
-

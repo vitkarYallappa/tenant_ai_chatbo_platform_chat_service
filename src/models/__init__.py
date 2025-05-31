@@ -110,9 +110,13 @@ from src.models.mongo.session_model import (
 # Redis models
 from src.models.redis.session_cache import (
     SessionCache,
-    ConversationState,
     ActiveConversations,
     SessionCacheManager
+)
+
+from src.models.redis.conversation_state import (
+    ConversationState,
+    ConversationStateManager
 )
 
 from src.models.redis.rate_limit_cache import (
@@ -218,6 +222,7 @@ __all__ = [
     # Redis models
     "SessionCache",
     "ConversationState",
+    "ConversationStateManager",
     "ActiveConversations",
     "SessionCacheManager",
     "RateLimitWindow",
