@@ -57,6 +57,10 @@ from .cache_repository import (
     get_cache_repository
 )
 
+from .tenant_repository import (
+    TenantRepository
+)
+
 # Repository factory for dependency injection
 from typing import Dict, Type, Any
 
@@ -66,6 +70,7 @@ _repository_registry: Dict[str, Type[Any]] = {
     'session': SessionRepository,
     'rate_limit': RateLimitRepository,
     'cache': CacheRepository,
+    'tenant': TenantRepository,
 }
 
 
@@ -119,6 +124,8 @@ __all__ = [
     'SessionRepository',
     'RateLimitRepository',
     'CacheRepository',
+    'TenantRepository',
+
 
     # Dependency injection helpers
     'get_conversation_repository',

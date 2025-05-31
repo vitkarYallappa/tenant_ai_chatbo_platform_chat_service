@@ -57,3 +57,6 @@ pyyaml==6.0.1                          # ✅ OK
 # Async utilities
 anyio==3.7.1                           # ✅ OK
 tenacity==8.2.3                        # ✅ OK
+
+#JWT
+PyJWT==2.8.0

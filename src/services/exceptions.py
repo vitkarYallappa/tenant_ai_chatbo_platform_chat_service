@@ -23,6 +23,13 @@ class ValidationError(ServiceError):
         self.field = field
         self.value = value
 
+class ForbiddenError(ServiceError):
+    """Exception for authorization failures"""
+
+    def __init__(self, message: str, user_id: str = None, resource: str = None):
+        super().__init__(message, error_code="UNAUTHORIZED")
+        self.user_id = user_id
+        self.resource = resource
 
 class UnauthorizedError(ServiceError):
     """Exception for authorization failures"""

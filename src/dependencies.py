@@ -41,6 +41,10 @@ try:
 except ImportError:
     RateLimitRepository = None
 
+try:
+    from src.repositories.tenant_repository import TenantRepository
+except ImportError:
+    TenantRepository = None
 # Core component dependencies
 try:
     from src.core.channels.channel_factory import ChannelFactory

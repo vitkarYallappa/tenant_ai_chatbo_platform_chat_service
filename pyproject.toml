@@ -84,6 +84,9 @@ dependencies = [
     # Async utilities
     "anyio>=3.7.1,<4.0.0",
     "tenacity>=8.2.3,<9.0.0",  # Retry logic
+
+    #JWT
+    "PyJWT>=2.8.0,<3.0.0",
 ]
 
 [project.optional-dependencies]
