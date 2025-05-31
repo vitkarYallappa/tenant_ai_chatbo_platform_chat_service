@@ -1,0 +1,159 @@
+name: Deploy to Production
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy'
+        required: true
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/chat-service
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=tag
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=production-latest
+      
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./docker/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            BUILD_TIME=${{ github.event.head_commit.timestamp }}
+            COMMIT_SHA=${{ github.sha }}
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN_PRODUCTION }}
+          aws-region: us-east-1
+      
+      - name: Blue-Green Deployment
+        run: |
+          # Update kubeconfig for production cluster
+          aws eks update-kubeconfig --region us-east-1 --name chatbot-production
+          
+          # Determine current and target environments
+          CURRENT_ENV=$(kubectl get service chat-service-active -n production -o jsonpath='{.spec.selector.env}')
+          TARGET_ENV=$([ "$CURRENT_ENV" = "blue" ] && echo "green" || echo "blue")
+          
+          echo "Current: $CURRENT_ENV, Target: $TARGET_ENV"
+          
+          # Update target environment with new image
+          kubectl set image deployment/chat-service-$TARGET_ENV \
+            chat-service=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+            -n production
+          
+          # Wait for deployment to be ready
+          kubectl rollout status deployment/chat-service-$TARGET_ENV -n production --timeout=600s
+          
+          # Verify deployment health
+          kubectl wait --for=condition=ready pod -l app=chat-service,env=$TARGET_ENV -n production --timeout=300s
+      
+      - name: Run production health checks
+        run: |
+          # Get the target environment service URL
+          TARGET_ENV=$(kubectl get service chat-service-active -n production -o jsonpath='{.spec.selector.env}')
+          TARGET_ENV=$([ "$TARGET_ENV" = "blue" ] && echo "green" || echo "blue")
+          
+          TARGET_URL=$(kubectl get service chat-service-$TARGET_ENV -n production -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+          
+          # Run comprehensive health checks
+          python scripts/production_health_check.py --host ${TARGET_URL} --timeout 300
+      
+      - name: Switch traffic to new version
+        run: |
+          TARGET_ENV=$(kubectl get service chat-service-active -n production -o jsonpath='{.spec.selector.env}')
+          TARGET_ENV=$([ "$TARGET_ENV" = "blue" ] && echo "green" || echo "blue")
+          
+          # Switch active service to point to new environment
+          kubectl patch service chat-service-active -n production -p '{"spec":{"selector":{"env":"'$TARGET_ENV'"}}}'
+          
+          echo "Traffic switched to $TARGET_ENV environment"
+      
+      - name: Cleanup old environment
+        run: |
+          # Scale down the old environment after successful deployment
+          OLD_ENV=$(kubectl get service chat-service-active -n production -o jsonpath='{.spec.selector.env}')
+          OLD_ENV=$([ "$OLD_ENV" = "blue" ] && echo "green" || echo "blue")
+          
+          # Wait 5 minutes before scaling down
+          sleep 300
+          
+          kubectl scale deployment chat-service-$OLD_ENV --replicas=1 -n production
+      
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref_name }}
+          release_name: Chat Service ${{ github.ref_name }}
+          body: |
+            ## Changes in this release
+            - Production deployment completed successfully
+            - Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            
+            ## Deployment Information
+            - Deployed at: ${{ github.event.head_commit.timestamp }}
+            - Commit: ${{ github.sha }}
+          draft: false
+          prerelease: false
+      
+      - name: Notify deployment status
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            🚀 Production deployment ${{ job.status }}
+            Version: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            Image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
