@@ -13,44 +13,41 @@ The Chat Service is a core component of the Multi-Tenant AI Chatbot Platform res
 ## Architecture
 
 ``` mermaid
-┌─────────────────────────────────────────────────────────────────┐
-│                      CHAT SERVICE ARCHITECTURE                  │
-└─────────────────────────────────────────────────────────────────┘
+graph TD
+    subgraph Channels
+        WebChat["Web Chat Channel"]
+        WhatsApp["WhatsApp Channel"]
+        Messenger["Messenger Channel"]
+    end
 
-┌──────────────┐    ┌──────────────┐    ┌──────────────┐
-│   Web Chat   │    │   WhatsApp   │    │  Messenger   │
-│   Channel    │    │   Channel    │    │   Channel    │
-└──────┬───────┘    └──────┬───────┘    └──────┬───────┘
-       │                   │                   │
-       └───────────────────┼───────────────────┘
-                           │
-              ┌────────────▼────────────┐
-              │      API Gateway        │
-              │   (Rate Limiting &      │
-              │   Authentication)       │ 
-              └────────────┬────────────┘
-                           │
-              ┌────────────▼────────────┐
-              │     Chat Service        │
-              │                         │
-              │  ┌─────────────────┐    │
-              │  │ Message Router  │    │
-              │  └─────────────────┘    │
-              │  ┌─────────────────┐    │
-              │  │ State Manager   │    │
-              │  └─────────────────┘    │
-              │  ┌─────────────────┐    │
-              │  │ Session Cache   │    │
-              │  └─────────────────┘    │
-              └────────────┬────────────┘
-                           │
-       ┌───────────────────┼───────────────────┐
-       │                   │                   │
-┌──────▼──────┐   ┌────────▼────────┐   ┌──────▼──────┐
-│  MongoDB    │   │   MCP Engine    │   │   Redis     │
-│(Conversations│  │  (Processing)  │   │  (Cache)    │
-│ & Messages) │   │                 │   │             │
-└─────────────┘   └─────────────────┘   └─────────────┘
+    WebChat --> APIGateway
+    WhatsApp --> APIGateway
+    Messenger --> APIGateway
+
+    subgraph Gateway
+        APIGateway["API Gateway\n(Rate Limiting & Authentication)"]
+    end
+
+    APIGateway --> ChatService
+
+    subgraph "Chat Service"
+        MessageRouter["Message Router"]
+        StateManager["State Manager"]
+        SessionCache["Session Cache"]
+    end
+
+    ChatService["Chat Service"] --> MessageRouter
+    ChatService --> StateManager
+    ChatService --> SessionCache
+
+    ChatService --> MongoDB
+    ChatService --> MCPEngine
+    ChatService --> Redis
+
+    MongoDB[("MongoDB\n(Conversations & Messages)")]
+    Redis[("Redis\n(Cache)")]
+    MCPEngine[("MCP Engine\n(Processing)")]
+
 ```
 ## Features
 
