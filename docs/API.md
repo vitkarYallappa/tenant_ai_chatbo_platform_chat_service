@@ -1,4 +1,3 @@
-```markdown
 # Chat Service API Documentation
 
 ## Authentication
@@ -78,4 +77,3 @@ GET /api/v2/chat/conversations/{conversation_id}
 ```
 
 For complete API documentation, see the [API Specifications](../02-API-Specifications.md).
-```

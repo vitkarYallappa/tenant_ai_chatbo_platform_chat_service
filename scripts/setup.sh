@@ -1,9 +1,3 @@
----
-
-## **Scripts**
-
-### `scripts/setup.sh`
-```bash
 #!/bin/bash
 set -e
 

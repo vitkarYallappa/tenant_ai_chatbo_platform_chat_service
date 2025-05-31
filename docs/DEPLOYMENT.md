@@ -1,4 +1,3 @@
-```markdown
 # Deployment Guide
 
 ## Production Deployment
@@ -46,4 +45,4 @@
 - MongoDB: Daily automated backups
 - Redis: RDB snapshots every 2 hours
 - Configuration: GitOps with ArgoCD
-```
+

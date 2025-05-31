@@ -1,4 +1,3 @@
-```markdown
 # Contributing to Chat Service
 
 ## Development Guidelines
@@ -44,4 +43,3 @@
 - Check for proper error handling
 - Verify documentation updates
 - Ensure backwards compatibility
-```
