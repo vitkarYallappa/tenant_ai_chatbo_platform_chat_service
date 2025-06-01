@@ -56,10 +56,10 @@ class WebhookResponse(BaseModel):
 async def whatsapp_webhook_verification(
         tenant_id: str,
         request: Request,
+        webhook_service: Annotated[WebhookService, Depends(get_webhook_service)],
         hub_mode: str = Query(alias="hub.mode"),
         hub_challenge: str = Query(alias="hub.challenge"),
         hub_verify_token: str = Query(alias="hub.verify_token"),
-        webhook_service: Annotated[WebhookService, Depends(get_webhook_service)]
 ) -> str:
     """
     Handle WhatsApp webhook verification
@@ -248,10 +248,10 @@ async def whatsapp_webhook_handler(
 async def messenger_webhook_verification(
         tenant_id: str,
         request: Request,
+        webhook_service: Annotated[WebhookService, Depends(get_webhook_service)],
         hub_mode: str = Query(alias="hub.mode"),
         hub_challenge: str = Query(alias="hub.challenge"),
         hub_verify_token: str = Query(alias="hub.verify_token"),
-        webhook_service: Annotated[WebhookService, Depends(get_webhook_service)]
 ) -> str:
     """
     Handle Facebook Messenger webhook verification

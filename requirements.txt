@@ -8,6 +8,8 @@ pydantic-settings==2.0.3                # ✅ Compatible with pydantic v2
 motor==3.3.2                            # ✅ MongoDB driver, works with 3.12
 redis==5.0.1                            # ✅ OK
 asyncpg==0.30.0                         # 🔼 FIXED: 0.28.2 does not exist — latest is 0.30.0
+SQLAlchemy==2.0.16
+sqlalchemy-utils==0.41.1
 
 # Message queue
 kafka-python==2.0.2                     # ✅ OK

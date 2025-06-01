@@ -43,6 +43,8 @@ SessionId = NewType('SessionId', str)
 FlowId = NewType('FlowId', str)
 IntegrationId = NewType('IntegrationId', str)
 ApiKeyId = NewType('ApiKeyId', str)
+WebhookId = NewType('WebhookId', str)
+DeliveryId = NewType('DeliveryId', str)
 
 # Timestamp type for consistent datetime handling
 Timestamp = NewType('Timestamp', datetime)
@@ -169,6 +171,59 @@ class SessionStatus(str, Enum):
     SUSPENDED = "suspended"
 
 
+class TenantStatus(str, Enum):
+    """Tenant status"""
+    ACTIVE = "active"
+    SUSPENDED = "suspended"
+    DELETED = "deleted"
+    TRIAL = "trial"
+    PENDING = "pending"
+
+
+class WebhookStatus(str, Enum):
+    """Webhook configuration status"""
+    ACTIVE = "active"
+    INACTIVE = "inactive"
+    FAILED = "failed"
+    DISABLED = "disabled"
+    PENDING = "pending"
+
+
+class WebhookEventType(str, Enum):
+    """Webhook event types"""
+    MESSAGE_RECEIVED = "message.received"
+    MESSAGE_SENT = "message.sent"
+    CONVERSATION_STARTED = "conversation.started"
+    CONVERSATION_COMPLETED = "conversation.completed"
+    CONVERSATION_ESCALATED = "conversation.escalated"
+    USER_FEEDBACK = "user.feedback"
+    INTEGRATION_SUCCESS = "integration.success"
+    INTEGRATION_FAILURE = "integration.failure"
+    SYSTEM_ERROR = "system.error"
+    TENANT_CREATED = "tenant.created"
+    TENANT_UPDATED = "tenant.updated"
+    TENANT_DELETED = "tenant.deleted"
+    WEBHOOK_CREATED = "webhook.created"
+    WEBHOOK_UPDATED = "webhook.updated"
+    WEBHOOK_DELETED = "webhook.deleted"
+
+class ComplianceLevel(str, Enum):
+    """Compliance levels"""
+    STANDARD = "standard"
+    GDPR = "gdpr"
+    HIPAA = "hipaa"
+    SOX = "sox"
+    ENTERPRISE = "enterprise"
+
+
+class DataResidency(str, Enum):
+    """Data residency regions"""
+    US = "us"
+    EU = "eu"
+    APAC = "apac"
+    CANADA = "canada"
+    UK = "uk"
+
 class DeliveryStatus(str, Enum):
     """Message delivery status"""
     SENT = "sent"
@@ -177,6 +232,9 @@ class DeliveryStatus(str, Enum):
     FAILED = "failed"
     PENDING = "pending"
     REJECTED = "rejected"
+    RETRYING = "retrying"
+    EXPIRED = "expired"
+    CANCELLED = "cancelled"
 
     @classmethod
     def get_successful_statuses(cls) -> List[str]:
@@ -446,6 +504,15 @@ class ErrorCode(str, Enum):
 # ============================================================================
 # PYDANTIC MODELS FOR COMPLEX DATA STRUCTURES
 # ============================================================================
+class BaseSchema(BaseModel):
+    """Base Pydantic schema with common configuration"""
+
+    class Config:
+        from_attributes = True
+        use_enum_values = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat() if v else None
+        }
 
 class MediaContent(BaseModel):
     """Media content structure for images, videos, audio, files"""
@@ -920,14 +987,16 @@ class PaginationParams:
 __all__ = [
     # Type aliases
     'TenantId', 'UserId', 'ConversationId', 'MessageId', 'SessionId',
-    'FlowId', 'IntegrationId', 'ApiKeyId', 'Timestamp',
+    'FlowId', 'IntegrationId', 'ApiKeyId', 'Timestamp', 'WebhookId',
+    'DeliveryId',
 
     # Enumerations
     'ChannelType', 'MessageType', 'MessageDirection', 'ConversationStatus',
     'SessionStatus', 'DeliveryStatus', 'Priority', 'UserRole', 'TenantPlan',
     'IntegrationType', 'ModelProvider', 'SentimentLabel', 'IntentConfidence',
     'LanguageCode', 'ErrorCode','MediaContent','MessageContent','ContactContent',
-    'ChannelMetadata', 'ProcessingHints',
+    'ChannelMetadata', 'ProcessingHints','TenantStatus', 'WebhookStatus',
+    'WebhookEventType','ComplianceLevel', 'DataResidency',
 
     # Validation utilities
     'ValidationUtils', 'SerializationUtils',

@@ -64,6 +64,10 @@ from .tenant_repository import (
 # Repository factory for dependency injection
 from typing import Dict, Type, Any
 
+from .webhook_repository import (
+    WebhookRepository
+)
+
 _repository_registry: Dict[str, Type[Any]] = {
     'conversation': ConversationRepository,
     'message': MessageRepository,
@@ -71,6 +75,7 @@ _repository_registry: Dict[str, Type[Any]] = {
     'rate_limit': RateLimitRepository,
     'cache': CacheRepository,
     'tenant': TenantRepository,
+    'webhook': WebhookRepository
 }
 
 
@@ -125,6 +130,8 @@ __all__ = [
     'RateLimitRepository',
     'CacheRepository',
     'TenantRepository',
+    'WebhookRepository',
+
 
 
     # Dependency injection helpers

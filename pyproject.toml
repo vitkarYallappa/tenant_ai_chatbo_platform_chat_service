@@ -35,6 +35,8 @@ dependencies = [
     "motor>=3.3.0,<4.0.0",  # MongoDB async driver
     "redis>=5.0.0,<6.0.0",
     "asyncpg>=0.28.0,<0.29.0",  # PostgreSQL async driver
+    "SQLAlchemy==2.0.16",
+    "sqlalchemy-utils==0.41.1",
 
     # Message queue
     "kafka-python>=2.0.2,<3.0.0",
